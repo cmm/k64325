@@ -1,0 +1,19 @@
+# Firmware and device-specific outputs are not redistributed.
+/work/
+/firmware/
+/Expert Mouse Wired V0116/
+/backup-*/
+/transaction-*/
+*.bin
+*.hex
+*.exe
+*.zip
+*.7z
+*.rar
+
+# Local analysis and Python/tool caches.
+/.cache/
+/.codegraph/
+/.ruff_cache/
+__pycache__/
+*.py[cod]
