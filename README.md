@@ -13,6 +13,7 @@ application pages. They run on Linux using Python's standard library.
 
 This project supports one original V0114 image, tested on one K64325 with an
 SG8F7581 controller and sensor board marked `MS-6070U-3205_Sensor`.
+See the [board photographs](docs/hardware.md).
 
 Before entering the loader, check
 [Kensington's serial-number eligibility list](https://www.kensington.com/en-gb/internal-support-pages/k64325-expert-mouse-wired-support-page/).

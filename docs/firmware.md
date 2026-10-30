@@ -26,7 +26,7 @@ order. Its loader bytes match the loader in Kensington's V0116 update image.
 The applications use different sensor data pins: P0.1 in V0114 and P0.2 in
 the analyzed V0116.
 
-The tested controller is marked SG8F7581. The sensor-board marking
+The [board photographs](hardware.md) show the SG8F7581 controller. The sensor-board marking
 `MS-6070U-3205_Sensor` points to the PAW3205 family, but the sensor package/suffix
 was not identified. The patch's register interpretation comes from the
 [PAW3205DB-TJ3T V0.2 specification](https://github.com/Li-Dongze/paw3205_mouse/blob/main/PAW3205DB-TJ3T_SPEC_V0.2.pdf).
