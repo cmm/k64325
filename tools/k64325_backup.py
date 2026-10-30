@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+import k64325_patch_sleep as patch
+
 # The loader fingerprint stops before the metadata page changed by entry/exit.
 FLASH_SIZE = 0x4000
 CHUNK_SIZE = 60
@@ -34,6 +36,13 @@ APP_USB = bytes.fromhex(
     "09 02 22 00 01 01 00 a0 32 09 04 00 00 01 03 01 02 00 "
     "09 21 11 01 00 01 22 34 00 07 05 81 03 04 00 0a"
 )
+APP_USB_VARIANTS = {
+    0x0114: tuple(
+        APP_USB[:12] + b"\x14\x01" + APP_USB[14:-1] + bytes((interval,))
+        for interval in patch.POLL_INTERVALS
+    ),
+    0x0116: (APP_USB,),
+}
 APP_HID = bytes.fromhex(
     "05 01 09 02 a1 01 09 01 a1 00 05 09 19 01 29 05 15 00 "
     "25 01 95 05 75 01 81 02 95 01 75 03 81 01 05 01 09 30 "
@@ -135,13 +144,11 @@ class USBNode:
     def mismatches(self, mode):
         if mode == "application":
             expected_id, expected_hid = APP_ID, APP_HID
-            expected_usb = bytearray(APP_USB)
-            if self.release in (0x0114, 0x0116):
-                expected_usb[12:14] = self.release.to_bytes(2, "little")
-            releases = (0x0114, 0x0116)
+            expected_usb = APP_USB_VARIANTS.get(self.release, ())
+            releases = APP_USB_VARIANTS
         elif mode == "boot":
             expected_id, expected_hid = BOOT_ID, BOOT_HID
-            expected_usb, releases = BOOT_USB, (0x0100,)
+            expected_usb, releases = (BOOT_USB,), (0x0100,)
         else:
             raise BackupError("unknown device mode")
         reasons = []
@@ -151,7 +158,7 @@ class USBNode:
             reasons.append("bcdDevice")
         if self.interface != 0:
             reasons.append("interface must be 0")
-        if self.usb_descriptor != expected_usb:
+        if self.usb_descriptor not in expected_usb:
             reasons.append("USB descriptors")
         if self.hid_descriptor != expected_hid:
             reasons.append("HID report descriptor")
@@ -577,7 +584,7 @@ def load_backup(directory, node):
         os.close(dir_fd)
 
 
-def wait_for_mode(node, mode):
+def wait_for_mode(node, mode, expected_usb=None):
     deadline = time.monotonic() + TRANSITION_TIMEOUT
     while True:
         nodes, _ = enumerate_nodes()
@@ -587,6 +594,7 @@ def wait_for_mode(node, mode):
             if candidate.port == node.port
             and candidate.usb_path == node.usb_path
             and not candidate.mismatches(mode)
+            and (expected_usb is None or candidate.usb_descriptor == expected_usb)
         ]
         if len(matches) > 1:
             raise BackupError(
@@ -625,6 +633,8 @@ def command_inspect(args):
                 if not reasons
                 else (f"{mode}: MISMATCH ({', '.join(reasons)})")
             )
+            if mode == "application" and not reasons:
+                result += f"; descriptor bInterval={node.usb_descriptor[-1]} ms"
         print(
             f"{node.device} port={node.port} {node.vid:04x}:{node.pid:04x} "
             f"bcdDevice={node.release:04x} interface={node.interface:02x} {result}\n"
@@ -699,6 +709,13 @@ def command_exit(args):
     node = inspect_node(args.device)
     node.require("boot", args.expect_port)
     image = load_backup(args.backup, node)
+    # Known V0114 hashes bind enumeration to a specific release and interval.
+    # A known loader does not identify other applications.
+    expected_usb = (
+        image[patch.APP_USB_START : patch.POLL_INTERVAL_OFFSET + 1]
+        if sha256(image) in (patch.SOURCE_SHA256, *patch.PROFILE_SHA256.values())
+        else None
+    )
     with HidrawTransport.open(args.device, args.expect_port, "boot") as transport:
         if transport.node != node:
             raise BackupError(
@@ -711,14 +728,15 @@ def command_exit(args):
             )
         print(EXIT_WARNING, file=sys.stderr, flush=True)
         transport.exit_loader()
-    observed = wait_for_mode(node, "application")
+    observed = wait_for_mode(node, "application", expected_usb=expected_usb)
     if observed is None:
         raise BackupError(
             "exit outcome unknown: application not observed on this port; run inspect; do not retry"
         )
     print(
         f"Observed application {observed.device} on port {observed.port}, "
-        f"bcdDevice={observed.release:04x}."
+        f"bcdDevice={observed.release:04x}, "
+        f"descriptor bInterval={observed.usb_descriptor[-1]} ms."
     )
     return 0
 

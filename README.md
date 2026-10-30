@@ -30,13 +30,16 @@ Disable the approximately 20-second optical-sensor deep sleep on one specific
 V0114 firmware image for the **wired Kensington Expert Mouse K64325**.
 
 The procedure reads firmware from your trackball, patches that local copy, and
-rewrites two application flash pages. It uses Linux hidraw/sysfs and Python's
-standard library. No vendor updater, firmware download, or firmware binary is
-included.
+rewrites two application flash pages for the sleep fix. Optional polling
+profiles also change the USB descriptor page. It uses Linux hidraw/sysfs and
+Python's standard library. No vendor updater, firmware download, or firmware
+binary is included.
 
-The patch disables automatic **sleep2**. It keeps sleep1, sensor resolution,
-and the USB polling interval unchanged. See [firmware notes](docs/firmware.md)
-for the patch and protocol details.
+Every profile disables automatic **sleep2** and keeps sleep1. Stock CPI leaves
+the original sensor configuration unchanged. Choose CPI and polling interval
+with the [profile builder](#build-a-cpipolling-profile); shorter polling
+intervals and CPI overrides are experimental.
+See [firmware notes](docs/firmware.md) for the patch and protocol details.
 
 ## Compatibility and risk
 
@@ -190,13 +193,15 @@ An unknown loader or incomplete backup causes refusal; there is no override.
 With the trackball still in bootloader mode:
 
 ```sh
-python3 -B tools/k64325_patch_sleep.py \
+python3 -B tools/k64325_build.py \
   --input work/original/dump-1.bin \
-  --out work/candidate
+  --cpi stock --poll-rate-hz 100
 ```
 
-The patcher checks the entire source hash, the hook bytes, and unused insertion
-space. It creates `candidate.bin` and a manifest describing the changes.
+The builder checks the entire source hash, the hook bytes, and unused insertion
+space. It creates the deterministically named image
+`work/k64325-v0114-no-sleep2-cpi-stock-poll-10ms/k64325-v0114-no-sleep2-cpi-stock-poll-10ms.bin`
+and `manifest.json` in the same directory.
 The candidate SHA-256 must be:
 
 ```text
@@ -205,8 +210,9 @@ The candidate SHA-256 must be:
 
 Its manifest status is `offline_candidate`: creating a file does not validate
 it on another device. The full image retains the entry-modified metadata. **Do
-not write it with a generic full-image flasher.** The installer below writes
-only the two intended application pages.
+not write it with a generic full-image flasher.** The installer writes only
+changed pages from its allowlist: `0x1f00`, `0x2200`, and `0x2e00`. The default
+sleep fix changes only the last two.
 
 ## 5. Install and verify
 
@@ -214,7 +220,7 @@ only the two intended application pages.
 sudo python3 -B tools/k64325_install.py install \
   --device "$BOOT" --expect-port "$PORT" \
   --backup work/original \
-  --candidate work/candidate/candidate.bin \
+  --candidate work/k64325-v0114-no-sleep2-cpi-stock-poll-10ms/k64325-v0114-no-sleep2-cpi-stock-poll-10ms.bin \
   --out work/install-1 \
   --confirm-application-writes
 ```
@@ -222,9 +228,11 @@ sudo python3 -B tools/k64325_install.py install \
 The installer:
 
 1. Revalidates the original double backup, candidate, descriptors, and open device.
-2. Saves two full current readbacks and requires equality with the original.
-3. Rewrites page `0x2e00` before page `0x2200`, preserving other bytes in each
-   page. It checks full-page erasure and full-page programmed contents.
+2. Saves two full current readbacks and requires equality with the original or
+   one of the supported sleep/CPI/polling images.
+3. Rewrites page `0x2e00` before page `0x2200`, then descriptor page `0x1f00`,
+   skipping pages already matching the target. It preserves other bytes in
+   each page and checks full-page erasure and full-page programmed contents.
 4. Saves two full final readbacks and compares them with the exact candidate.
 
 Require `install: two full readbacks match target SHA-256` followed by the
@@ -270,6 +278,116 @@ Check:
 If exit errors or times out, inspect the current enumeration; do not repeat the
 exit command blindly.
 
+## Build a CPI/polling profile
+
+Build offline from the **original** readback, even when a patched image is
+installed. This command neither opens a device nor installs firmware:
+
+```sh
+mkdir -p work
+python3 -B tools/k64325_build.py \
+  --input work/original/dump-1.bin \
+  --cpi 1600 --poll-rate-hz 250
+```
+
+This creates:
+
+```text
+work/k64325-v0114-no-sleep2-cpi-1600-poll-4ms/
+  k64325-v0114-no-sleep2-cpi-1600-poll-4ms.bin
+  manifest.json
+```
+
+- `--cpi`: `stock`, `600`, `800`, `1000`, `1200`, or `1600`.
+  `stock` does not alter the original CPI instructions: the firmware chooses
+  600 or 800 according to sensor ID under the cited sensor map. An explicit
+  number selects that setting for both accepted IDs.
+- `--poll-rate-hz`: `100`, `250`, `500`, or `1000`, corresponding to descriptor
+  intervals of 10, 4, 2, or 1 ms. These are nominal requests, not measured report
+  rates. Linux xHCI rounds the original 10 ms request to 8 ms / 125 Hz.
+- `--out-root`: an existing output parent, default `work`. The profile directory
+  and binary basename are derived from the settings; an existing profile
+  directory is refused, never overwritten. Reuse the image or choose a different
+  output parent for a separate build.
+
+All 24 combinations include the sleep fix. The filename records the requested
+CPI and descriptor interval; the manifest records the source/output hashes and
+byte changes. The sensor variant and resulting CPI are unconfirmed. See
+[CPI and rate interactions](docs/firmware.md#how-resolution-and-rates-interact)
+before comparing profiles.
+
+Install the generated `.bin` with the guarded installer from step 5, substituting
+its path for `--candidate` and choosing a new transaction directory. Keep the
+original double backup as `--backup`; use the successful transaction's `after/`
+backup for exit. A build manifest does not replace a device backup.
+
+## Polling experiments
+
+These profiles retain the sleep fix and change only USB `bInterval` at image
+offset `0x1f36`. USB speed, clocks, timers, and sensor settings remain unchanged.
+
+| Builder `--poll-rate-hz` | Requested interval | Nominal polling rate |
+| --- | --- | --- |
+| `100` | 10 ms | 100 Hz; Linux rounds this to 8 ms / 125 Hz |
+| `250` | 4 ms | 250 Hz |
+| `500` | 2 ms | 500 Hz |
+| `1000` | 1 ms | 1,000 Hz |
+
+**Shortened intervals are experimental and nonstandard for low-speed USB.**
+[Linux accepts them](https://github.com/torvalds/linux/blob/master/drivers/usb/core/config.c),
+but other hosts may not. These are polling requests, not verified fresh-motion
+rates. The firmware suppresses reports when inputs have not changed. Sensor
+sampling and firmware execution time can limit throughput; button debounce
+and recovery use call counts, so their timing may change with workload.
+
+Start with 4 ms. Generate it from the **original** readback, even if the sleep
+fix is already installed:
+
+```sh
+python3 -B tools/k64325_build.py \
+  --input work/original/dump-1.bin \
+  --cpi stock --poll-rate-hz 250
+```
+
+The [profile hashes](docs/firmware.md#optional-polling-profiles) identify each
+complete candidate. Keep using `work/original` as the installer's backup input;
+do not replace it with a backup of a patched image.
+
+If the application is running, repeat identification and bootloader entry
+above, updating `APP` and `BOOT` from the reported nodes. Then install:
+
+```sh
+sudo python3 -B tools/k64325_install.py install \
+  --device "$BOOT" --expect-port "$PORT" \
+  --backup work/original \
+  --candidate work/k64325-v0114-no-sleep2-cpi-stock-poll-4ms/k64325-v0114-no-sleep2-cpi-stock-poll-4ms.bin \
+  --out work/install-4ms-1 --confirm-application-writes
+```
+
+Require two full readbacks matching the selected profile's hash. Switching
+between profiles that differ only in polling writes only the descriptor page.
+Changing CPI also changes page `0x2200`. On
+error, keep the transaction and follow [errors and recovery](#errors-and-recovery).
+
+Only after success, use this transaction's verified backup for exit:
+
+```sh
+sudo chown -R "$(id -u):$(id -g)" work/install-4ms-1
+sudo python3 -B tools/k64325_backup.py exit \
+  --device "$BOOT" --expect-port "$PORT" \
+  --backup work/install-4ms-1/after --confirm-marker-writes
+```
+
+The observed application must match the installed profile's descriptors; exit
+prints its interval. Measure report intervals during continuous ball motion,
+and repeat the motion/button/scroll, idle, suspend/resume, and re-entry checks.
+For re-entry testing, exit using `work/install-4ms-1/after` rather than an older
+transaction's backup.
+
+To try 2 or 1 ms, select `--poll-rate-hz 500` or `1000` and use a new transaction
+directory. To return to the tested sleep-only image, use rollback with
+`--target sleep` as below.
+
 ## Rollback
 
 Rollback requires the original `work/original` backup and an accessible,
@@ -277,18 +395,32 @@ matching bootloader on the same physical port/sysfs path. If the patched
 application is running, first identify it and enter the bootloader as above.
 Use the current boot node in `BOOT`.
 
+Choose the target explicitly:
+
+- `--target sleep`: restore stock CPI while keeping the sensor fix. The default
+  interval is the original 10 ms; add `--poll-interval-ms 4`, `2`, or `1` to keep
+  a shorter polling interval while undoing a CPI override.
+- `--target original`: restore the original application, removing both the
+  sleep fix and any CPI/polling changes. This is the default if `--target` is
+  omitted and requires the default 10 ms interval argument.
+
+For example, to undo a polling experiment while keeping the sleep fix:
+
 ```sh
 sudo python3 -B tools/k64325_install.py rollback \
   --device "$BOOT" --expect-port "$PORT" \
   --backup work/original \
+  --target sleep \
   --out work/rollback-1 \
   --confirm-application-writes
 ```
 
-Rollback restores page `0x2200` before `0x2e00` and skips pages already matching
-the original. It accepts partially erased/programmed contents inside those
-two pages, but refuses any change elsewhere. It requires two full final reads
-matching the original SHA-256 before reporting success.
+The original target restores page `0x2200` before `0x2e00`; the sleep target
+restores `0x2e00` before `0x2200`. Both restore descriptor page `0x1f00` last and
+skip pages already matching the target. Rollback accepts partially
+erased/programmed contents inside these three pages, but refuses any change
+elsewhere. It requires two full final reads matching the selected target's
+SHA-256 before reporting success.
 
 Only after that success:
 
@@ -300,9 +432,8 @@ sudo python3 -B tools/k64325_backup.py exit \
 sudo chown -R "$(id -u):$(id -g)" work/rollback-1
 ```
 
-Use the original backup as rollback input, not `work/install-1/after`.
-Rollback restores the original application; it cannot restore metadata erased
-before the initial backup.
+Use the original backup as rollback input, not a transaction's `after/` backup.
+Neither target can restore metadata erased before the initial backup.
 
 ## Errors and recovery
 
@@ -311,7 +442,7 @@ before the initial backup.
 - **Existing output directory:** keep it. For a later, separately chosen
   operation, use a new name such as `work/rollback-2`; existing logs are not
   resume files.
-- **Wrong identity, port, hash, or changed bytes outside the two pages:** stop.
+- **Wrong identity, port, hash, or changed bytes outside the three allowed pages:** stop.
   There is no force mode. Do not edit a manifest to make validation pass.
 - **Erase/program failure, timeout, or disconnect:** retain the transaction and
   original backup. Do not issue exit or immediately resend commands. A program
@@ -328,8 +459,9 @@ before the initial backup.
 | Tool | Purpose |
 | --- | --- |
 | `tools/k64325_backup.py` | Sysfs inspection, explicit entry, double readback, guarded exit |
-| `tools/k64325_patch_sleep.py` | Hash-pinned local patch generation |
-| `tools/k64325_install.py` | Two-page installation and explicit rollback |
+| `tools/k64325_build.py` | CPI/polling selection with deterministic image names |
+| `tools/k64325_patch_sleep.py` | Hash-pinned patch generator; explicit `--out` directory containing `candidate.bin` |
+| `tools/k64325_install.py` | Guarded application-page installation and explicit rollback |
 
 Each tool has `--help`. Syntax and help can be checked without a trackball:
 

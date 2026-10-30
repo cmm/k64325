@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install or restore two hash-pinned V0114 application pages."""
+"""Install or restore hash-pinned V0114 sleep/polling application images."""
 
 import argparse
 import json
@@ -14,11 +14,13 @@ from pathlib import Path
 import k64325_backup as backup
 import k64325_patch_sleep as patch
 
-ORIGINAL_SHA256 = "c916f7f222b2991adad2816d467868ee73c828e48c17299270a84de5d2bcd6d1"
-CANDIDATE_SHA256 = "7c1bd5139abaf5b7100b4779b228438361804aae82e595e2f19e3c3d4038a074"
+ORIGINAL_SHA256 = patch.SOURCE_SHA256
 PAGE_SIZE = 256
-ALLOWED_PAGES = (0x2200, 0x2E00)
-PAGE_ORDER = {"install": (0x2E00, 0x2200), "rollback": (0x2200, 0x2E00)}
+ALLOWED_PAGES = (0x1F00, 0x2200, 0x2E00)
+PAGE_ORDER = {
+    "install": (0x2E00, 0x2200, 0x1F00),
+    "rollback": (0x2200, 0x2E00, 0x1F00),
+}
 WARNING = (
     "Keep loader mode after any error; do not retry commands or request exit. "
     "A program failure can leave flash mode/interrupt state unclean. "
@@ -29,7 +31,7 @@ WARNING = (
 
 def encode_erase(page):
     if type(page) is not int or page not in ALLOWED_PAGES:
-        raise backup.BackupError("erase requires page 0x2200 or 0x2e00")
+        raise backup.BackupError("erase requires page 0x1f00, 0x2200, or 0x2e00")
     return bytes((1, 1, 1, (page >> 8) - 0x0C)) + bytes(60)
 
 
@@ -47,7 +49,7 @@ def encode_program(address, data):
     ):
         raise backup.BackupError(
             "program requires an even address and even length 2..58 within one "
-            "allowed page (0x2200 or 0x2e00)"
+            "allowed page (0x1f00, 0x2200, or 0x2e00)"
         )
     return bytes((1, 2, count, address >> 8, address & 255)) + data + bytes(59 - count)
 
@@ -219,15 +221,15 @@ def load_candidate(path, original):
         candidate = backup.read_regular(fd, backup.FLASH_SIZE)
     finally:
         os.close(fd)
-    if (
-        len(candidate) != backup.FLASH_SIZE
-        or backup.sha256(candidate) != CANDIDATE_SHA256
-    ):
-        raise backup.BackupError("candidate SHA-256 is not the pinned sleep2 image")
-    expected, _ = patch.prepare(original, "pinned original backup")
+    parameters = patch.profile_parameters(candidate)
+    if parameters is None:
+        raise backup.BackupError(
+            "candidate SHA-256 is not a pinned sleep/profile image"
+        )
+    expected, _ = patch.prepare(original, "pinned original backup", *parameters)
     if candidate != expected:
         raise backup.BackupError(
-            "candidate differs from the sleep2 patch of the original"
+            "candidate differs from the generated sleep/profile patch of the original"
         )
     return candidate
 
@@ -287,16 +289,23 @@ def require_current(operation, current, original):
         raise backup.BackupError("current image is not 16384 bytes")
     if operation == "install":
         if current != original:
-            raise backup.BackupError(
-                "install requires current flash to equal the pinned original"
-            )
+            parameters = patch.profile_parameters(current)
+            if (
+                parameters is None
+                or current
+                != patch.prepare(original, "pinned original backup", *parameters)[0]
+            ):
+                raise backup.BackupError(
+                    "install requires current flash to equal the pinned original "
+                    "or a generated sleep/profile image"
+                )
     elif operation == "rollback":
         outside = bytearray(current)
         for page in ALLOWED_PAGES:
             outside[page : page + PAGE_SIZE] = original[page : page + PAGE_SIZE]
         if outside != original:
             raise backup.BackupError(
-                "rollback refuses changed bytes outside the two allowed pages"
+                "rollback refuses changed bytes outside the three allowed pages"
             )
     else:
         raise backup.BackupError("unknown operation")
@@ -311,8 +320,21 @@ def read_page(transport, page):
     )
 
 
+def page_order(operation, target):
+    parameters = patch.profile_parameters(target)
+    if operation == "install" and parameters is not None:
+        return PAGE_ORDER["install"]
+    if operation == "rollback":
+        fingerprint = backup.sha256(target)
+        if fingerprint == ORIGINAL_SHA256:
+            return PAGE_ORDER["rollback"]
+        if parameters is not None and parameters[1] is None:
+            return PAGE_ORDER["install"]
+    raise backup.BackupError("unsupported operation or target image")
+
+
 def write_pages(transport, transaction, operation, current, target):
-    for page in PAGE_ORDER[operation]:
+    for page in page_order(operation, target):
         page_target = target[page : page + PAGE_SIZE]
         if current[page : page + PAGE_SIZE] == page_target:
             transaction.append("page_skipped", page=page)
@@ -344,11 +366,28 @@ def command_update(args):
     original = backup.load_backup(args.backup, node)
     if backup.sha256(original) != ORIGINAL_SHA256:
         raise backup.BackupError("backup is not the pinned V0114 original; no override")
-    target = (
-        load_candidate(args.candidate, original)
-        if args.command == "install"
-        else original
-    )
+    if args.command == "install":
+        target = load_candidate(args.candidate, original)
+        interval, cpi = patch.profile_parameters(target)
+        target_name = f"sleep-{interval}ms" + (f"-cpi{cpi}" if cpi is not None else "")
+    elif args.command == "rollback":
+        interval, cpi = args.poll_interval_ms, None
+        if type(interval) is not int or interval not in patch.POLL_INTERVALS:
+            raise backup.BackupError("rollback poll interval must be 10, 4, 2, or 1 ms")
+        target_name = args.target
+        if target_name == "original":
+            if interval != 10:
+                raise backup.BackupError(
+                    "--target original requires the default --poll-interval-ms 10"
+                )
+            target = original
+        elif target_name == "sleep":
+            target, _ = patch.prepare(original, "pinned original backup", interval, cpi)
+        else:
+            raise backup.BackupError("rollback target must be original or sleep")
+    else:
+        raise backup.BackupError("unknown operation")
+    order = page_order(args.command, target)
     header = {
         "operation": args.command,
         "device": node.device,
@@ -365,9 +404,12 @@ def command_update(args):
         "source_backup": str(args.backup),
         "source_sha256": backup.sha256(original),
         "target_sha256": backup.sha256(target),
+        "target": target_name,
+        "target_bInterval_ms": target[patch.POLL_INTERVAL_OFFSET],
+        "target_cpi_requested": cpi,
         "candidate": str(args.candidate) if args.command == "install" else None,
         "allowed_pages": list(ALLOWED_PAGES),
-        "page_order": list(PAGE_ORDER[args.command]),
+        "page_order": list(order),
         "ack_is_not_readback": True,
     }
     with (
@@ -379,7 +421,15 @@ def command_update(args):
         print(WARNING, file=sys.stderr, flush=True)
         current = capture(transport, transaction, "before")
         require_current(args.command, current, original)
-        transaction.append("current_accepted", sha256=backup.sha256(current))
+        transaction.append(
+            "current_accepted",
+            sha256=backup.sha256(current),
+            effective_page_order=[
+                page
+                for page in order
+                if current[page : page + PAGE_SIZE] != target[page : page + PAGE_SIZE]
+            ],
+        )
         write_pages(transport, transaction, args.command, current, target)
         capture(transport, transaction, "after", target=target)
         transaction.append("complete", target_sha256=backup.sha256(target))
@@ -394,8 +444,8 @@ def command_update(args):
 def parser():
     result = argparse.ArgumentParser(
         description=(
-            "Guarded V0114 sleep2 installer/rollback for an already enumerated loader. "
-            "Only pages 0x2200 and 0x2e00 are writable; metadata is never programmed. "
+            "Guarded V0114 sleep/profile installer/rollback for an already enumerated loader. "
+            "Only pages 0x1f00, 0x2200 and 0x2e00 are writable; metadata is never programmed. "
             "Default/help does not access a device."
         ),
         epilog=(
@@ -407,10 +457,13 @@ def parser():
     )
     commands = result.add_subparsers(dest="command")
     for operation, description in (
-        ("install", "require the pinned original; write cave page before hook page"),
+        (
+            "install",
+            "require original backup and known current image; write cave, hook, descriptor",
+        ),
         (
             "rollback",
-            "restore pinned original; write hook before cave; permit partial pages",
+            "restore original or stock-CPI sleep/poll baseline; permit partial allowed pages",
         ),
     ):
         command = commands.add_parser(
@@ -431,7 +484,7 @@ def parser():
             "--confirm-application-writes",
             action="store_true",
             required=True,
-            help="acknowledge two-page erase/program and application/recovery risks",
+            help="acknowledge application-page erase/program and application/recovery risks",
         )
         if operation == "install":
             command.add_argument(
@@ -439,7 +492,21 @@ def parser():
                 required=True,
                 type=Path,
                 metavar="FILE",
-                help="exact pinned sleep2 binary; supplied manifests are not trusted",
+                help="exact pinned sleep/profile binary; supplied manifests are not trusted",
+            )
+        else:
+            command.add_argument(
+                "--target",
+                choices=("original", "sleep"),
+                default="original",
+                help="original (default) or stock-CPI sleep image at the selected poll interval",
+            )
+            command.add_argument(
+                "--poll-interval-ms",
+                type=int,
+                choices=patch.POLL_INTERVALS,
+                default=10,
+                help="bInterval for --target sleep (default: 10); original requires 10",
             )
     return result
 
@@ -452,7 +519,7 @@ def main(argv=None):
         return 0
     try:
         return command_update(args)
-    except (OSError, backup.BackupError, KeyboardInterrupt) as error:
+    except (OSError, backup.BackupError, patch.PatchError, KeyboardInterrupt) as error:
         print(f"error: {error}\n{WARNING}", file=sys.stderr)
         return 130 if isinstance(error, KeyboardInterrupt) else 1
 
