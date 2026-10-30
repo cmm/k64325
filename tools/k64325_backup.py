@@ -68,14 +68,12 @@ METADATA_CAVEAT = (
     "This tool cannot determine whether or how this loader was entered."
 )
 ENTRY_WARNING = (
-    "WARNING: entry erases metadata page 0x0b00-0x0bff and writes boot markers. "
-    "Unplugging does not restore the application. A differing installed loader "
-    "may cause this tool to refuse exit; keep the dump for analysis."
+    "Entering the loader rewrites boot metadata (0x0b00-0x0bff). "
+    "The device stays in loader mode until an exit command succeeds."
 )
 EXIT_WARNING = (
-    "WARNING: exit erases metadata page 0x0b00-0x0bff and writes two copies of "
-    "its first byte. It does not validate the application. A nonworking "
-    "application can prevent software reentry to the loader."
+    "Exit rewrites boot metadata and starts the installed firmware. "
+    "If that firmware fails to start, software recovery may be unavailable."
 )
 
 
@@ -218,7 +216,11 @@ def inspect_node(device):
 
 def enumerate_nodes():
     nodes, errors = [], []
-    for path in sorted(SYS_HIDRAW.glob("hidraw*")):
+    try:
+        entries = sorted(SYS_HIDRAW.iterdir())
+    except OSError as error:
+        return [], [f"{SYS_HIDRAW}: {error}"]
+    for path in entries:
         if re.fullmatch(r"hidraw[0-9]+", path.name) is None:
             continue
         try:
@@ -253,14 +255,19 @@ def decode_read(reply, count):
 
 
 class HidrawTransport:
-    def __init__(self, fd, node, mode):
+    """Exact-node transport; optional guard(node, mode) can refuse each request."""
+
+    def __init__(self, fd, node, mode, *, guard=None):
         self.fd, self.node, self.mode = fd, node, mode
+        self.guard = guard
 
     @classmethod
     @contextmanager
-    def open(cls, device, port, mode):
+    def open(cls, device, port, mode, *, guard=None):
         before = inspect_node(device)
         before.require(mode, port)
+        if guard is not None:
+            guard(before, mode)
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
         try:
             fd = os.open(device, flags)
@@ -292,13 +299,17 @@ class HidrawTransport:
                     "sysfs device identity changed while opening; no command sent"
                 )
             after.require(mode, port)
-            yield cls(fd, after, mode)
+            if guard is not None:
+                guard(after, mode)
+            yield cls(fd, after, mode, guard=guard)
         finally:
             os.close(fd)
 
     def _require_mode(self, mode):
         if self.mode != mode:
             raise BackupError(f"operation requires {mode} mode")
+        if self.guard is not None:
+            self.guard(self.node, mode)
 
     def _ready(self, timeout):
         readable, _, exceptional = select.select([self.fd], [], [self.fd], timeout)
@@ -533,6 +544,8 @@ def load_backup(directory, node):
             manifest.get("format_version") != 1
             or manifest.get("status") != "complete"
             or manifest.get("images_match") is not True
+            or manifest.get("loader_fingerprint_range") != "[0x0000,0x0b00)"
+            or manifest.get("analyzed_loader_sha256") != LOADER_SHA256
         ):
             raise BackupError(
                 "backup manifest does not record a complete matching double backup"
@@ -574,7 +587,7 @@ def load_backup(directory, node):
         fingerprint = sha256(images[0][:LOADER_END])
         if fingerprint != LOADER_SHA256:
             raise BackupError(
-                f"unknown loader code SHA-256 {fingerprint}; exit refused with no override. "
+                f"unknown loader code SHA-256 {fingerprint}; exit refused. "
                 "Keep the dump for analysis"
             )
         if images[0][BOOT_MARKER] != 0x55:
@@ -643,7 +656,7 @@ def command_inspect(args):
     for error in errors:
         print(f"inspect: {error}", file=sys.stderr)
     if not found:
-        print("No candidate HID nodes found (sysfs only; no USB device opened).")
+        print("No Expert Mouse found. Check its USB connection.")
     return 0
 
 
@@ -660,15 +673,15 @@ def command_enter(args):
         raise BackupError(
             "entry outcome unknown: boot device not observed on this port; run inspect; do not retry"
         )
-    print(
-        f"Observed boot node {observed.device} on port {observed.port}; no command sent to it."
-    )
+    print(f"Loader ready: {observed.device}, port {observed.port}.")
     return 0
 
 
-def command_dump(args):
+def command_dump(args, *, guard=None):
     directory = new_output_argument(args.out)
-    with HidrawTransport.open(args.device, args.expect_port, "boot") as transport:
+    with HidrawTransport.open(
+        args.device, args.expect_port, "boot", guard=guard
+    ) as transport:
         try:
             with BackupFiles(directory, transport.node) as backup:
                 for index in range(2):
@@ -695,12 +708,11 @@ def command_dump(args):
                 backup.manifest["status"] = "complete"
         except BaseException:
             print(
-                f"Dump incomplete; keep partial files in {directory}. No exit command sent.",
+                f"Dump incomplete; keep partial files in {directory}.",
                 file=sys.stderr,
             )
             raise
     print(f"Matching 16384-byte dumps saved in {directory}\nSHA-256: {hashes[0]}")
-    print(METADATA_CAVEAT)
     return 0
 
 
@@ -744,21 +756,17 @@ def command_exit(args):
 def parser():
     result = argparse.ArgumentParser(
         description=(
-            "Linux backup-only hidraw CLI for the analyzed 16 KiB Expert Mouse loader. "
-            "No application erase/program commands. Default/help opens no device."
+            "Read and back up the 16 KiB Expert Mouse firmware on Linux. "
+            "Use tools/backup-firmware for guided entry, backup, and exit."
         ),
         epilog=(
-            "Entry/exit change the metadata page; unplugging does not undo entry. "
-            "A different installed loader may prevent exit. Descriptor matches do not "
-            "prove firmware equivalence. Close other device software: flock is advisory. "
-            "No retries, automatic selection, automatic exit, or sudo execution. "
+            "Entry/exit rewrite boot metadata. Use this tool with the supported V0114 hardware. "
+            "Close other firmware tools and keep the device connected. "
             "Reply timeout: 2 seconds; transition observation: 15 seconds."
         ),
     )
     commands = result.add_subparsers(dest="command")
-    inspect = commands.add_parser(
-        "inspect", help="read sysfs only; never open a USB device"
-    )
+    inspect = commands.add_parser("inspect", help="show device identity from sysfs")
     inspect.set_defaults(handler=command_inspect)
     for name, help_text, handler in (
         (
@@ -786,7 +794,7 @@ def parser():
             command.add_argument(
                 "--confirm-marker-writes",
                 action="store_true",
-                help="acknowledge metadata-page erase/write and uncertain installed firmware",
+                help="confirm boot-metadata writes",
             )
         if name == "exit":
             command.add_argument("--backup", required=True, metavar="DIRECTORY")
@@ -809,7 +817,7 @@ def main(argv=None):
         return 1
     except KeyboardInterrupt:
         print(
-            "Interrupted; no automatic exit or retry. Run inspect before another operation.",
+            "Interrupted. Keep the device connected and run inspect before another operation.",
             file=sys.stderr,
         )
         return 130

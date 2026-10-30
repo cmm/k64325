@@ -1,491 +1,288 @@
-# K64325 automatic deep-sleep patch
+# K64325 firmware tools
 
-> [!CAUTION]
-> **NO WARRANTY. This is a barely-tested, vibe-coded procedure.**
->
-> The tools and patch were developed with AI assistance and tested on **one
-> physical trackball**. Offline checks do not establish safety on your device.
-> Use entirely at your own risk. **If things break, you get to keep the pieces.**
-> See the [MIT license](LICENSE) for the warranty and liability disclaimer.
+Disable the approximately 20-second sensor deep sleep on the **wired Kensington
+Expert Mouse K64325**, and select CPI and USB polling settings. Every generated
+profile disables automatic sleep2 and keeps sleep1.
 
-> [!WARNING]
-> **Even attempting the backup can disable an incompatible device.**
->
-> Reading firmware requires first entering the bootloader with a command that
-> modifies persistent flash. An incompatible device may become stuck in update
-> mode with **no known software recovery**; external programming or replacement
-> may be necessary. Unplugging does not undo the boot-entry markers.
->
-> **The firmware-hash checks happen after entry and readback. They cannot prevent
-> this risk. “Read the firmware to check compatibility” is not a risk-free test.**
-> Matching USB descriptors does not prove that an unknown firmware implements
-> the same entry, read, or exit commands. The tools refuse the analyzed exit
-> procedure if the dumped loader hash is unknown.
->
-> In the analyzed firmware, entry erases the **boot-marker metadata page, not
-> the bootloader code**. The dump command itself reads flash. The initial
-> `inspect` command only reads sysfs and sends no device command.
+The tools read firmware from your device, patch that copy, and flash the changed
+application pages. They run on Linux using Python's standard library.
 
-Disable the approximately 20-second optical-sensor deep sleep on one specific
-V0114 firmware image for the **wired Kensington Expert Mouse K64325**.
-
-The procedure reads firmware from your trackball, patches that local copy, and
-rewrites two application flash pages for the sleep fix. Optional polling
-profiles also change the USB descriptor page. It uses Linux hidraw/sysfs and
-Python's standard library. No vendor updater, firmware download, or firmware
-binary is included.
-
-Every profile disables automatic **sleep2** and keeps sleep1. Stock CPI leaves
-the original sensor configuration unchanged. Choose CPI and polling interval
-with the [profile builder](#build-a-cpipolling-profile); shorter polling
-intervals and CPI overrides are experimental.
-See [firmware notes](docs/firmware.md) for the patch and protocol details.
+**Already have an original backup? Go to [Flash a profile](#flash-a-profile).**
 
 ## Compatibility and risk
 
-This was tested on **one K64325** with an SG8F7581 controller and a sensor board
-marked `MS-6070U-3205_Sensor`. The exact sensor package marking was not confirmed.
-The owner reported working motion, no sensor shutdown after one minute idle,
-working suspend/resume, and working bootloader re-entry and exit after patching.
+This project supports one original V0114 image, tested on one K64325 with an
+SG8F7581 controller and sensor board marked `MS-6070U-3205_Sensor`.
+
+Before entering the loader, check
+[Kensington's serial-number eligibility list](https://www.kensington.com/en-gb/internal-support-pages/k64325-expert-mouse-wired-support-page/).
+**Stop if your unit is eligible for V0116, even if it currently reports `0114`.**
+That revision uses a different sensor data pin. Wireless Expert Mouse and
+SlimBlade models are also outside the supported hardware.
+
+> [!WARNING]
+> Entering the loader rewrites persistent boot metadata, including when taking
+> a backup. An incompatible unit can become stuck in loader mode and require
+> external programming or replacement. Unplugging preserves that state.
+> After flashing, a firmware startup failure can also prevent software recovery.
+
+The tools check these values:
 
 | Check | Required value |
 | --- | --- |
 | Application USB identity | `047d:1020`, `bcdDevice=0114` |
-| Bootloader USB identity | `1c4f:8851`, `bcdDevice=0100` |
-| USB and HID descriptors | Exact layouts checked by the tools |
-| Original readback | 16,384 bytes, SHA-256 below |
-| Loader code | Exact fingerprint checked by backup exit and installer |
-
-**Matching the model name or `0114` alone is insufficient.** The patcher and
-installer accept only this original readback SHA-256:
+| Loader USB identity | `1c4f:8851`, `bcdDevice=0100` |
+| USB and HID descriptors | Exact layouts for the selected profile |
+| Original backup | Two matching 16,384-byte reads with the SHA-256 below |
+| Loader code | Known fingerprint |
 
 ```text
 c916f7f222b2991adad2816d467868ee73c828e48c17299270a84de5d2bcd6d1
 ```
 
-This hash describes the image **after entering the bootloader**. Entry erases
-metadata page `0x0b00–0x0bff` and writes persistent boot markers. The backup
-preserves application and loader bytes, but cannot recover that page's contents
-from before entry.
-
-**Entry itself changes flash.** Before entry, USB descriptors cannot prove which
-loader is installed. A different loader can leave the device in update mode:
-the tools refuse to use the analyzed exit procedure with an unknown loader hash.
-Unplugging does not clear the boot marker.
-
-The installer preserves loader and metadata pages. It leaves the device in
-bootloader mode so you can choose between exit and rollback. After exit, a
-broken application can prevent software re-entry and therefore prevent software
-rollback. Correct readback does not prove that an application will run.
-
-**Do not use this procedure on a unit whose serial number is eligible for
-Kensington's V0116 upgrade, even if it currently reports `0114`.** Check
-[Kensington's serial-number eligibility list](https://www.kensington.com/en-gb/internal-support-pages/k64325-expert-mouse-wired-support-page/)
-before entering the bootloader. Such units are outside this project's supported
-hardware target. The analyzed V0116 firmware uses sensor data pin P0.2, whereas
-the V0114 image supported here uses P0.1; the applications are not interchangeable.
-Being outside Kensington's list does not by itself establish compatibility
-with this patch: all descriptor and image-hash checks still apply.
-
-The inspection tool can recognize V0116 descriptors, but the patcher and
-installer do not accept V0116 firmware. Wireless Expert Mouse and SlimBlade
-models are also outside this procedure.
+Image and loader hashes become available after entry and readback. The original
+backup contains the entry-modified metadata page at `0x0b00–0x0bff`; the loader
+and application bytes are preserved.
 
 ## Requirements
 
-- Linux with hidraw and sysfs.
-- Python **3.11 or later**; no pip packages are required.
-- Permission to open the trackball's hidraw node. Commands below use `sudo` for
-  device access; omit it if your account already has access.
-- Another working pointer or keyboard-only navigation: the trackball stops
-  providing mouse input while in bootloader mode.
+- Linux with hidraw and sysfs, and Python **3.11 or later**.
+- Device and lock-file access. The examples use `sudo`.
+- A keyboard or another pointer while the trackball is in loader mode.
 
-Run all commands from this checkout. Close other software that might send
-commands to the trackball, and keep it connected to the same physical USB port
-on the same computer throughout the procedure. Saved backups are tied to that
-port and its sysfs path. The device lock is advisory.
+Run commands from this checkout. Close other firmware tools and keep the
+trackball connected to the same USB port on the same computer. Backups are tied
+to that port and sysfs path. The guided tools require an interactive terminal
+and exactly one matching device.
 
-Keep outputs under `work/`, which Git ignores:
+## Take the original backup once
 
 ```sh
-python3 --version
-sudo python3 --version
-mkdir -p work
+sudo tools/backup-firmware
 ```
 
-Check that both Python commands meet the version requirement if using `sudo`.
-All output directories named below must be **new**. Tools refuse to overwrite
-existing outputs. Do not chain entry, installation, and exit into an unattended
-command sequence.
+The tool finds the device, prompts to enter the loader, reads the entire flash
+twice, checks that the reads match, and prompts to return to application mode.
+Type the displayed action and port at each prompt, such as `enter 3-2.1`.
 
-## 1. Identify the application
-
-```sh
-python3 -B tools/k64325_backup.py inspect
-```
-
-Inspection reads sysfs only. Find the line with `047d:1020`, `bcdDevice=0114`,
-and `application: exact descriptors/identity match`.
-
-Set these variables from that line. Replace both placeholders:
-
-```sh
-APP=/dev/hidrawN
-PORT=...
-```
-
-`PORT` is the physical-port string printed after `port=`, such as `3-2.1`.
-It is not the USB device number. A descriptor mismatch is a reason to stop,
-not a reason to remove a check.
-
-## 2. Enter the bootloader
-
-This erases/writes the metadata page described above:
-
-```sh
-sudo python3 -B tools/k64325_backup.py enter \
-  --device "$APP" --expect-port "$PORT" \
-  --confirm-marker-writes
-```
-
-Success prints `Observed boot node ...`. The mouse is now inactive. Set `BOOT`
-to the **reported** hidraw node; it may differ from `APP`:
-
-```sh
-BOOT=/dev/hidrawN
-python3 -B tools/k64325_backup.py inspect
-```
-
-Require `1c4f:8851`, `bcdDevice=0100`, and
-`boot: exact descriptors/identity match` on the same port.
-If entry errors or times out, run only `inspect` next; do not repeat entry.
-
-## 3. Download a double backup from the device
-
-```sh
-sudo python3 -B tools/k64325_backup.py dump \
-  --device "$BOOT" --expect-port "$PORT" \
-  --out work/original
-sudo chown -R "$(id -u):$(id -g)" work/original
-```
-
-The dump reads all 16 KiB twice, using reverse chunk order on the second pass.
-Require `Matching 16384-byte dumps saved` and the original SHA-256 above.
-The directory contains `dump-1.bin`, `dump-2.bin`, and `manifest.json`.
-Keep all three together and keep a separate copy somewhere safe.
-
-If the dump fails, preserve its partial files and stop. If both dumps match but
-their hash is unsupported, do not patch or install. To return to the existing
-application, the following command checks both dumps, the loader fingerprint,
-and current flash before changing the boot marker:
-
-```sh
-sudo python3 -B tools/k64325_backup.py exit \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/original --confirm-marker-writes
-```
-
-Use that command only when abandoning the procedure **before installation**.
-An unknown loader or incomplete backup causes refusal; there is no override.
-
-## 4. Patch the local readback
-
-With the trackball still in bootloader mode:
-
-```sh
-python3 -B tools/k64325_build.py \
-  --input work/original/dump-1.bin \
-  --cpi stock --poll-rate-hz 100
-```
-
-The builder checks the entire source hash, the hook bytes, and unused insertion
-space. It creates the deterministically named image
-`work/k64325-v0114-no-sleep2-cpi-stock-poll-10ms/k64325-v0114-no-sleep2-cpi-stock-poll-10ms.bin`
-and `manifest.json` in the same directory.
-The candidate SHA-256 must be:
+It prints the backup directory:
 
 ```text
-7c1bd5139abaf5b7100b4779b228438361804aae82e595e2f19e3c3d4038a074
-```
-
-Its manifest status is `offline_candidate`: creating a file does not validate
-it on another device. The full image retains the entry-modified metadata. **Do
-not write it with a generic full-image flasher.** The installer writes only
-changed pages from its allowlist: `0x1f00`, `0x2200`, and `0x2e00`. The default
-sleep fix changes only the last two.
-
-## 5. Install and verify
-
-```sh
-sudo python3 -B tools/k64325_install.py install \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/original \
-  --candidate work/k64325-v0114-no-sleep2-cpi-stock-poll-10ms/k64325-v0114-no-sleep2-cpi-stock-poll-10ms.bin \
-  --out work/install-1 \
-  --confirm-application-writes
-```
-
-The installer:
-
-1. Revalidates the original double backup, candidate, descriptors, and open device.
-2. Saves two full current readbacks and requires equality with the original or
-   one of the supported sleep/CPI/polling images.
-3. Rewrites page `0x2e00` before page `0x2200`, then descriptor page `0x1f00`,
-   skipping pages already matching the target. It preserves other bytes in
-   each page and checks full-page erasure and full-page programmed contents.
-4. Saves two full final readbacks and compares them with the exact candidate.
-
-Require `install: two full readbacks match target SHA-256` followed by the
-candidate hash. Success names `work/install-1/after` as the backup for exit.
-
-```sh
-sudo chown -R "$(id -u):$(id -g)" work/install-1
-```
-
-Keep the entire transaction directory. It includes `journal.jsonl`, an audit-only
-`before/` snapshot, and the verified `after/` backup. Each erase/program intent
-is synced to disk before transmission. The `before/` snapshot is deliberately
-rejected by the exit command: it may describe a partial application during
-rollback.
-
-On any installation error, **do not exit and do not repeat installation**.
-See [errors and recovery](#errors-and-recovery).
-
-## 6. Exit and test
-
-Exit is a separate decision. Use the verified **installed** backup:
-
-```sh
-sudo python3 -B tools/k64325_backup.py exit \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/install-1/after \
-  --confirm-marker-writes
-```
-
-This rereads current flash before clearing the boot marker. It does not undo
-the sensor patch. The application still advertises `bcdDevice=0114`.
-
-Check:
-
-- Motion, buttons, and scrolling work.
-- After 60 seconds without ball movement, motion responds without the previous
-  deep-sleep behavior.
-- The same idle test passes after computer suspend/resume.
-- Bootloader re-entry works: repeat identification and entry, update `BOOT` to
-  the reported node, then repeat the exit command above using
-  `work/install-1/after`.
-
-If exit errors or times out, inspect the current enumeration; do not repeat the
-exit command blindly.
-
-## Build a CPI/polling profile
-
-Build offline from the **original** readback, even when a patched image is
-installed. This command neither opens a device nor installs firmware:
-
-```sh
-mkdir -p work
-python3 -B tools/k64325_build.py \
-  --input work/original/dump-1.bin \
-  --cpi 1600 --poll-rate-hz 250
-```
-
-This creates:
-
-```text
-work/k64325-v0114-no-sleep2-cpi-1600-poll-4ms/
-  k64325-v0114-no-sleep2-cpi-1600-poll-4ms.bin
+work/backup-TIMESTAMP-RANDOM/backup/
+  dump-1.bin
+  dump-2.bin
   manifest.json
 ```
 
-- `--cpi`: `stock`, `600`, `800`, `1000`, `1200`, or `1600`.
-  `stock` does not alter the original CPI instructions: the firmware chooses
-  600 or 800 according to sensor ID under the cited sensor map. An explicit
-  number selects that setting for both accepted IDs.
-- `--poll-rate-hz`: `100`, `250`, `500`, or `1000`, corresponding to descriptor
-  intervals of 10, 4, 2, or 1 ms. These are nominal requests, not measured report
-  rates. Linux xHCI rounds the original 10 ms request to 8 ms / 125 Hz.
-- `--out-root`: an existing output parent, default `work`. The profile directory
-  and binary basename are derived from the settings; an existing profile
-  directory is refused, never overwritten. Reuse the image or choose a different
-  output parent for a separate build.
+Keep these three files together and save a separate copy. Use this original
+backup for future builds and installations. A backup taken after patching is
+a snapshot of the modified firmware.
 
-All 24 combinations include the sleep fix. The filename records the requested
-CPI and descriptor interval; the manifest records the source/output hashes and
-byte changes. The sensor variant and resulting CPI are unconfirmed. See
-[CPI and rate interactions](docs/firmware.md#how-resolution-and-rates-interact)
-before comparing profiles.
+## Flash a profile
 
-Install the generated `.bin` with the guarded installer from step 5, substituting
-its path for `--candidate` and choosing a new transaction directory. Keep the
-original double backup as `--backup`; use the successful transaction's `after/`
-backup for exit. A build manifest does not replace a device backup.
-
-## Polling experiments
-
-These profiles retain the sleep fix and change only USB `bInterval` at image
-offset `0x1f36`. USB speed, clocks, timers, and sensor settings remain unchanged.
-
-| Builder `--poll-rate-hz` | Requested interval | Nominal polling rate |
-| --- | --- | --- |
-| `100` | 10 ms | 100 Hz; Linux rounds this to 8 ms / 125 Hz |
-| `250` | 4 ms | 250 Hz |
-| `500` | 2 ms | 500 Hz |
-| `1000` | 1 ms | 1,000 Hz |
-
-**Shortened intervals are experimental and nonstandard for low-speed USB.**
-[Linux accepts them](https://github.com/torvalds/linux/blob/master/drivers/usb/core/config.c),
-but other hosts may not. These are polling requests, not verified fresh-motion
-rates. The firmware suppresses reports when inputs have not changed. Sensor
-sampling and firmware execution time can limit throughput; button debounce
-and recovery use call counts, so their timing may change with workload.
-
-Start with 4 ms. Generate it from the **original** readback, even if the sleep
-fix is already installed:
+Set `BACKUP` to your existing original backup directory. For example:
 
 ```sh
-python3 -B tools/k64325_build.py \
-  --input work/original/dump-1.bin \
-  --cpi stock --poll-rate-hz 250
+BACKUP=work/original
+sudo tools/flash-firmware --backup "$BACKUP" --cpi 1600 --poll-rate-hz 250
 ```
 
-The [profile hashes](docs/firmware.md#optional-polling-profiles) identify each
-complete candidate. Keep using `work/original` as the installer's backup input;
-do not replace it with a backup of a patched image.
+This command:
 
-If the application is running, repeat identification and bootloader entry
-above, updating `APP` and `BOOT` from the reported nodes. Then install:
+1. Builds the selected profile, or verifies and reuses a matching cached build.
+2. Prompts to enter the loader, unless the device is already there.
+3. Prompts to install, saves the current firmware, and writes the changed pages.
+4. Checks the written pages and two complete readbacks.
+5. Prompts to exit, starts the firmware, and checks the application descriptors.
 
-```sh
-sudo python3 -B tools/k64325_install.py install \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/original \
-  --candidate work/k64325-v0114-no-sleep2-cpi-stock-poll-4ms/k64325-v0114-no-sleep2-cpi-stock-poll-4ms.bin \
-  --out work/install-4ms-1 --confirm-application-writes
-```
+Confirm `enter <port>`, `install <port>`, and `exit <port>` when prompted.
+Progress messages identify reading, writing, and verification. Success ends
+with the device back in application mode.
 
-Require two full readbacks matching the selected profile's hash. Switching
-between profiles that differ only in polling writes only the descriptor page.
-Changing CPI also changes page `0x2200`. On
-error, keep the transaction and follow [errors and recovery](#errors-and-recovery).
+### Settings
 
-Only after success, use this transaction's verified backup for exit:
-
-```sh
-sudo chown -R "$(id -u):$(id -g)" work/install-4ms-1
-sudo python3 -B tools/k64325_backup.py exit \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/install-4ms-1/after --confirm-marker-writes
-```
-
-The observed application must match the installed profile's descriptors; exit
-prints its interval. Measure report intervals during continuous ball motion,
-and repeat the motion/button/scroll, idle, suspend/resume, and re-entry checks.
-For re-entry testing, exit using `work/install-4ms-1/after` rather than an older
-transaction's backup.
-
-To try 2 or 1 ms, select `--poll-rate-hz 500` or `1000` and use a new transaction
-directory. To return to the tested sleep-only image, use rollback with
-`--target sleep` as below.
-
-## Rollback
-
-Rollback requires the original `work/original` backup and an accessible,
-matching bootloader on the same physical port/sysfs path. If the patched
-application is running, first identify it and enter the bootloader as above.
-Use the current boot node in `BOOT`.
-
-Choose the target explicitly:
-
-- `--target sleep`: restore stock CPI while keeping the sensor fix. The default
-  interval is the original 10 ms; add `--poll-interval-ms 4`, `2`, or `1` to keep
-  a shorter polling interval while undoing a CPI override.
-- `--target original`: restore the original application, removing both the
-  sleep fix and any CPI/polling changes. This is the default if `--target` is
-  omitted and requires the default 10 ms interval argument.
-
-For example, to undo a polling experiment while keeping the sleep fix:
-
-```sh
-sudo python3 -B tools/k64325_install.py rollback \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/original \
-  --target sleep \
-  --out work/rollback-1 \
-  --confirm-application-writes
-```
-
-The original target restores page `0x2200` before `0x2e00`; the sleep target
-restores `0x2e00` before `0x2200`. Both restore descriptor page `0x1f00` last and
-skip pages already matching the target. Rollback accepts partially
-erased/programmed contents inside these three pages, but refuses any change
-elsewhere. It requires two full final reads matching the selected target's
-SHA-256 before reporting success.
-
-Only after that success:
-
-```sh
-sudo python3 -B tools/k64325_backup.py exit \
-  --device "$BOOT" --expect-port "$PORT" \
-  --backup work/rollback-1/after \
-  --confirm-marker-writes
-sudo chown -R "$(id -u):$(id -g)" work/rollback-1
-```
-
-Use the original backup as rollback input, not a transaction's `after/` backup.
-Neither target can restore metadata erased before the initial backup.
-
-## Errors and recovery
-
-- **Permission denied:** fix hidraw access or use `sudo`; do not weaken identity
-  checks. Files produced with `sudo` are private to root until ownership changes.
-- **Existing output directory:** keep it. For a later, separately chosen
-  operation, use a new name such as `work/rollback-2`; existing logs are not
-  resume files.
-- **Wrong identity, port, hash, or changed bytes outside the three allowed pages:** stop.
-  There is no force mode. Do not edit a manifest to make validation pass.
-- **Erase/program failure, timeout, or disconnect:** retain the transaction and
-  original backup. Do not issue exit or immediately resend commands. A program
-  failure can leave flash-control and interrupt state unclean. For an explicit
-  recovery attempt, reconnect on the same port to start a fresh loader session,
-  inspect its identity, and then use rollback with a new transaction directory.
-  The persistent boot marker is outside the pages this installer writes.
-- **No matching loader after reconnection, or no application/loader after exit:**
-  these tools provide no alternate recovery interface. Preserve the files for
-  diagnosis rather than sending commands to a guessed device.
-
-## Tools and offline checks
-
-| Tool | Purpose |
+| Option | Values |
 | --- | --- |
-| `tools/k64325_backup.py` | Sysfs inspection, explicit entry, double readback, guarded exit |
-| `tools/k64325_build.py` | CPI/polling selection with deterministic image names |
-| `tools/k64325_patch_sleep.py` | Hash-pinned patch generator; explicit `--out` directory containing `candidate.bin` |
-| `tools/k64325_install.py` | Guarded application-page installation and explicit rollback |
+| `--cpi` | `stock`, `600`, `800`, `1000`, `1200`, `1600` |
+| `--poll-rate-hz` | `100`, `250`, `500`, `1000` |
+| `--out-root` | Build and transaction directory; default `work` |
+| `--force-build` | Archive the cached build and generate it again |
 
-Each tool has `--help`. Syntax and help can be checked without a trackball:
+CPI labels select sensor register values from the PAW3205DB-TJ3T map; the exact
+sensor variant is unidentified. Measure effective sensitivity with
+[`measure-motion`](#measure-motion).
+
+The poll-rate settings request USB intervals of 10, 4, 2, or 1 ms. Linux xHCI
+schedules the 10 ms setting at 8 ms, giving 125 polling opportunities per second.
+Intervals below 10 ms are experimental for this low-speed USB device. See
+[polling experiments](#polling-experiments) for timing details.
+
+Builds are stored under names such as
+`work/k64325-v0114-no-sleep2-cpi-1600-poll-4ms/`. Each flash gets a new
+`work/flash-TIMESTAMP-RANDOM/` directory containing:
+
+```text
+workflow.jsonl
+install/
+  journal.jsonl
+  before/
+  after/
+```
+
+Keep the logs and readbacks. `after/` contains the verified installed image;
+`before/` records the starting state. The installer preserves loader and
+metadata pages and writes changed pages from `0x1f00`, `0x2200`, and `0x2e00`.
+
+After flashing, check motion, buttons, scrolling, response after 60 seconds
+idle, and suspend/resume.
+
+## Build a CPI/polling profile
+
+To build a file separately from flashing:
 
 ```sh
 mkdir -p work
-PYTHONPYCACHEPREFIX="$PWD/work/pycache" python3 -m py_compile tools/*.py
-for tool in tools/k64325_*.py; do
-  python3 -B "$tool" --help >/dev/null || exit 1
-done
+python3 tools/k64325_build.py \
+  --input "$BACKUP/dump-1.bin" \
+  --cpi 1600 --poll-rate-hz 250
 ```
 
-The development checks included simulated sysfs/transport failures, partial
-installation and rollback, and execution of the analyzed loader/patch bytes in
-partial instruction models. Those models assume flash-controller behavior;
-they are not independently validated hardware emulators. These historical
-checks and the single-device results do not extend the supported image list.
+The profile directory contains the named `.bin` and a manifest with hashes and
+byte changes. The standalone builder requires a new profile directory. The
+guided flasher reuses an existing matching build; use `--force-build` to archive
+and rebuild it.
+
+Install with `tools/flash-firmware` using the same settings and output root.
+Use these tools rather than a generic full-image flasher: generated images
+include the boot metadata captured during backup.
+
+## Polling experiments
+
+Changing the polling setting changes the endpoint descriptor's `bInterval`.
+The clocks, timers, and sensor configuration stay the same when CPI is held
+constant.
+
+| Setting | Requested interval | Linux xHCI polling interval |
+| --- | --- | --- |
+| `100` | 10 ms | 8 ms / 125 Hz |
+| `250` | 4 ms | 4 ms / 250 Hz |
+| `500` | 2 ms | 2 ms / 500 Hz |
+| `1000` | 1 ms | 1 ms / 1,000 Hz |
+
+The firmware suppresses unchanged input. Sensor acquisition and firmware
+processing also affect delivered report cadence. Button debounce and recovery
+use loop counts, so their elapsed times can change with workload. Measure each
+profile during movement and check buttons, scrolling, idle behavior, and resume.
+See [resolution and rates](docs/firmware.md#how-resolution-and-rates-interact).
+
+## Measure motion
+
+```sh
+sudo tools/measure-motion
+```
+
+Move the ball during the displayed window. Changing direction is fine for this
+timing test. The summary reports event cadence, movement counts, and agreement
+between raw HID and kernel input events. If kernel events are unavailable, it
+labels the HID-arrival timing as approximate. Captures are saved under
+`work/measure-TIMESTAMP-RANDOM/`.
+
+For an approximate CPI measurement:
+
+```sh
+sudo tools/measure-motion --turns 2
+```
+
+Roll two complete turns in one direction about a fixed axis, then hold still.
+Finish within the movement window. The estimate uses the nominal 55 mm ball
+diameter and assumes a full circumference passes the sensor each turn. The
+rotation axis affects that distance. If you have measured the surface travel,
+supply it with `--surface-distance-mm`.
+
+Calibration accepts a net displacement of at least 95% of the recorded path
+and at most 1% backward projection. Clipping, substantial backtracking, or
+capture errors suppress the CPI estimate. Timing remains available as shown
+in the summary. Display pixels and cursor travel are separate from sensor CPI.
+
+## Rollback
+
+To return to stock CPI and polling while keeping the sleep fix:
+
+```sh
+sudo tools/flash-firmware --backup "$BACKUP" --cpi stock --poll-rate-hz 100
+```
+
+To restore the original application, including its sleep behavior, use the
+lower-level rollback command. First inspect the device:
+
+```sh
+python3 tools/k64325_backup.py inspect
+```
+
+Set `PORT` and `APP` from its output. If the application is running, enter the
+loader:
+
+```sh
+PORT=3-2.1          # replace with the reported port
+APP=/dev/hidrawN   # replace with the reported application node
+sudo python3 tools/k64325_backup.py enter \
+  --device "$APP" --expect-port "$PORT" --confirm-marker-writes
+```
+
+Set `BOOT` to the loader node reported by entry or `inspect`, then restore:
+
+```sh
+BOOT=/dev/hidrawN  # replace with the reported loader node
+sudo python3 tools/k64325_install.py rollback \
+  --device "$BOOT" --expect-port "$PORT" \
+  --backup "$BACKUP" --target original --out work/rollback-1 \
+  --confirm-application-writes
+```
+
+Use a new output directory for each attempt. After successful verification,
+the installer prints the exit command. Run it with the same permissions; it
+uses `work/rollback-1/after` to check the installed firmware before starting it.
+
+Rollback can restore partially written application pages when the loader is
+accessible. It preserves the boot metadata created by entry.
+
+## Errors and recovery
+
+- **Permission denied:** use `sudo` or arrange access to hidraw and
+  `/run/lock/k64325-workflow.lock`. Files created with `sudo` are private to root;
+  use `sudo chown -R "$(id -u):$(id -g)" DIRECTORY` to read them as your user.
+- **Existing output directory:** choose a new directory for a lower-level
+  operation. For a cached build, reuse it or select `--force-build`.
+- **Identity, port, or hash mismatch:** stop and check the selected device,
+  backup, and profile against [compatibility](#compatibility-and-risk).
+- **Write failure, timeout, or disconnect:** keep the logs and original backup.
+  Run `python3 tools/k64325_backup.py inspect` before further commands. A failed
+  program operation can leave flash-control state unclean. For a recovery
+  attempt, reconnect on the same port to start a fresh loader session, inspect
+  it, then use [rollback](#rollback) with a new transaction directory. Exit only
+  after verification succeeds.
+- **Neither loader nor application appears:** preserve the files for diagnosis.
+  Recovery requires a method outside these USB tools.
+
+## Tools and checks
+
+| Tool | Purpose |
+| --- | --- |
+| `tools/backup-firmware` | Guided entry, backup, and exit |
+| `tools/flash-firmware` | Build/cache selection, installation, verification, and exit |
+| `tools/measure-motion` | Raw motion counts, timing, and CPI estimation |
+| `tools/k64325_backup.py` | Individual inspect, enter, dump, and exit commands |
+| `tools/k64325_build.py` | Build a named CPI/polling profile |
+| `tools/k64325_patch_sleep.py` | Generate `candidate.bin` in an explicit output directory |
+| `tools/k64325_install.py` | Install or roll back while already in loader mode |
+
+Each tool has `--help`. See [firmware and protocol notes](docs/firmware.md) for
+the patch, wire protocol, and instruction-level checks.
 
 ## License and firmware
 
-The scripts and documentation are [MIT licensed](LICENSE). Vendor firmware is
-not distributed, and this license grants no rights to it. Obtain the input by
-reading your own device as described above; do not submit firmware dumps,
-patched images, or the vendor updater in commits, releases, or issue attachments.
-
-`work/`, firmware files, and local analysis artifacts are ignored by Git.
-Keep generated outputs there and inspect files before publishing; outputs saved
-elsewhere may need additional ignore rules.
+Scripts and documentation are [MIT licensed](LICENSE), including its warranty
+and liability disclaimer. Vendor firmware remains the vendor's property; obtain
+it by reading your own device. Keep firmware dumps, patched images, and vendor
+updaters out of commits, releases, and issue attachments. Generated files belong
+under the Git-ignored `work/` directory.

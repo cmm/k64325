@@ -14,18 +14,15 @@ intervals below the USB specification's 10 ms minimum; its xHCI implementation
 can configure 1 ms from such a descriptor. Thus a descriptor-only low-speed
 experiment is a smaller first step than changing device speed or clocks.
 
-This does not establish that the MCU will produce fresh reports at the requested
-rate, or that another host/OS will accept the nonstandard descriptor. Actual
-report cadence must be measured during motion. A host poll can receive NAK
-instead of a report.
+Measure report cadence during motion: a host poll can receive NAK instead of a
+report. Sub-10-ms low-speed intervals also need testing on other hosts and OSes.
 
 The completed [internal timing analysis](v0114-polling-timing.md) found no fixed
 100 Hz software throttle: endpoint completion clears the pending flag and
 bypasses the timer wait, and queuing a report triggers acquisition of the next
 sample. This supports starting with descriptor-only 4/2/1-ms profiles, retaining
-the existing clocks, timers, and sleep fix. Do not shorten the timer fallback
-preemptively: it can process and discard changed inputs while the endpoint is
-busy. Sustainable throughput and optical sampling remain measurement questions;
+the existing clocks, timers, and sleep fix. Shortening the timer fallback can
+discard changed inputs while the endpoint is busy. Measure throughput separately;
 button debounce and recovery use call counts, so their wall times may change
 with workload.
 
@@ -36,7 +33,7 @@ with workload.
 - Sleep-only candidate: SHA-256
   `7c1bd5139abaf5b7100b4779b228438361804aae82e595e2f19e3c3d4038a074`.
 - Device and configuration descriptors occupy `[0x1f03,0x1f37)` and match
-  `tools/k64325_backup.py`'s `APP_USB` with release `0x0114` exactly.
+  `tools/k64325_backup.py`'s `APP_USB_VARIANTS[0x0114][0]` exactly.
 - Endpoint descriptor `[0x1f30,0x1f37)` is `07 05 81 03 04 00 0a`: endpoint
   `0x81`, interrupt IN, four-byte maximum packet, `bInterval=10`.
 - GET_DESCRIPTOR's configuration branch at `0x1144..0x1157` selects code
@@ -79,16 +76,15 @@ Linux source inspected on 2026-10-27:
   `usbhid.mousepoll` overriding the URB interval and USB core rounding
   full-/low-speed intervals down to a power of two. This override does not
   change the device descriptor or USB speed. xHCI endpoint setup reads the
-  descriptor directly; do not promise that the module parameter alone changes
-  the actual schedule on every controller.
+   descriptor directly, so the effect of the module parameter depends on the
+   host controller.
 
 Full-speed interrupt descriptors permit 1–255 ms. A full-speed implementation
 is the standards-compliant way to advertise 1 ms, but Linux's explicit
 low-speed exception means full-speed migration is not a prerequisite for a
-Linux-only experiment. Do not confuse a descriptor request with either
-guaranteed transfers or fresh sensor samples.
+Linux-only experiment.
 
-## Full-speed investigation: useful comparison, not a ready patch
+## Full-speed investigation
 
 The [SG8F7581 manufacturer page](https://www.sigmachip.com/en/keyboard-controller/sg8f7581/)
 documents both USB full-speed and low-speed modes, internal USB clock recovery,
@@ -106,8 +102,8 @@ loader initialization at `0x084e`:
 
 Both paths clear SFR `0xc1` first. Bit 3 is a strong speed-selection candidate,
 but its meaning is inferred rather than confirmed by a register manual.
-Replacing the application instruction with `43 c1 08` would set that bit;
-it is not enough to claim a working full-speed application.
+Replacing the application instruction with `43 c1 08` would set that bit.
+Testing also needs to cover the clock setup below.
 
 Clock initialization differs too:
 
@@ -121,8 +117,8 @@ Clock initialization differs too:
 Application addresses include `0x279f: 75 bc 88` and
 `0x27b2: 75 c7 89`. No register-level source obtained so far resolves the
 clock-selection/divider/ready-bit meanings. Changing clocks can affect timer
-cadence, bit-banged sensor timing, and delay loops. Copying the loader sequence
-blindly would not establish that those application timings remain correct.
+cadence, bit-banged sensor timing, and delay loops; verify those timings before
+reusing the loader's clock setup.
 
 Suspend/wakeup masks of `0xc1` at `0x1044`, `0x1064`, `0x1090`, `0x1093`,
 `0x109d`, and `0x10a0` preserve bit 3. The recovery path writes `0xc1=0x82`
@@ -136,9 +132,8 @@ when loader bytes remain intact.
 Polling profiles preserve the sleep hook/trampoline and loader/metadata bytes.
 A descriptor change adds page `0x1f00` to the pages the installer may rewrite.
 The host tools recognize each supported interval's exact descriptor and image
-hash, including when checking application enumeration after exit. A broader
-timing or clock change would require separate analysis; the descriptor-only
-findings do not cover it. See the [firmware notes](../firmware.md#optional-polling-profiles)
+hash, including when checking application enumeration after exit. See the
+[firmware notes](../firmware.md#optional-polling-profiles)
 for the implemented profile and transition rules.
 
 ## Verification performed
@@ -153,6 +148,5 @@ for the implemented profile and transition rules.
 - Firmware mode/clock instructions are identical between original and
   sleep-only images. No polling variant was written to a firmware file.
 
-These checks establish byte locations, host-code behavior, and preservation
-of the existing patch. They do not establish the device's achievable report
-rate or host interoperability.
+These checks cover byte locations, host-code behavior, and preservation of the
+sleep patch. Throughput and host interoperability require device measurements.

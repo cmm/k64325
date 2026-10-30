@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import shlex
 import stat
 import sys
 import time
@@ -22,10 +23,8 @@ PAGE_ORDER = {
     "rollback": (0x2200, 0x2E00, 0x1F00),
 }
 WARNING = (
-    "Keep loader mode after any error; do not retry commands or request exit. "
-    "A program failure can leave flash mode/interrupt state unclean. "
-    "Readback does not prove application boot or recovery. Exiting the loader can "
-    "lose software rollback if the application cannot reenter it."
+    "If flashing fails, keep the device connected in loader mode and inspect it "
+    "before retrying or exiting."
 )
 
 
@@ -357,15 +356,18 @@ def write_pages(transport, transaction, operation, current, target):
         )
 
 
-def command_update(args):
+def command_update(args, *, guard=None, expected_target=None, guided=False):
+    """Optionally bind the loaded target to bytes selected by a calling workflow."""
     if not args.confirm_application_writes:
         raise backup.BackupError("--confirm-application-writes is required")
     directory = backup.new_output_argument(args.out)
     node = backup.inspect_node(args.device)
     node.require("boot", args.expect_port)
+    if guard is not None:
+        guard(node, "boot")
     original = backup.load_backup(args.backup, node)
     if backup.sha256(original) != ORIGINAL_SHA256:
-        raise backup.BackupError("backup is not the pinned V0114 original; no override")
+        raise backup.BackupError("backup is not the pinned V0114 original")
     if args.command == "install":
         target = load_candidate(args.candidate, original)
         interval, cpi = patch.profile_parameters(target)
@@ -387,6 +389,10 @@ def command_update(args):
             raise backup.BackupError("rollback target must be original or sleep")
     else:
         raise backup.BackupError("unknown operation")
+    if expected_target is not None and target != expected_target:
+        raise backup.BackupError(
+            "candidate no longer matches the requested target bytes/SHA-256"
+        )
     order = page_order(args.command, target)
     header = {
         "operation": args.command,
@@ -414,11 +420,13 @@ def command_update(args):
     }
     with (
         Transaction(directory, header) as transaction,
-        InstallTransport.open(args.device, args.expect_port, "boot") as transport,
+        InstallTransport.open(
+            args.device, args.expect_port, "boot", guard=guard
+        ) as transport,
     ):
         if transport.node != node:
             raise backup.BackupError("device identity changed after backup validation")
-        print(WARNING, file=sys.stderr, flush=True)
+        print("Reading current firmware...", flush=True)
         current = capture(transport, transaction, "before")
         require_current(args.command, current, original)
         transaction.append(
@@ -430,28 +438,40 @@ def command_update(args):
                 if current[page : page + PAGE_SIZE] != target[page : page + PAGE_SIZE]
             ],
         )
+        print("Writing changed pages...", flush=True)
         write_pages(transport, transaction, args.command, current, target)
+        print("Verifying firmware...", flush=True)
         capture(transport, transaction, "after", target=target)
         transaction.append("complete", target_sha256=backup.sha256(target))
-    print(
-        f"{args.command}: two full readbacks match target SHA-256 {backup.sha256(target)}"
-    )
-    print(f"Backup for separate explicit backup-tool exit: {directory / 'after'}")
-    print(WARNING)
+    print("Firmware verified: both full readbacks match.", flush=True)
+    if not guided:
+        command = shlex.join(
+            [
+                "python3",
+                "tools/k64325_backup.py",
+                "exit",
+                "--device",
+                str(args.device),
+                "--expect-port",
+                args.expect_port,
+                "--backup",
+                str(directory / "after"),
+                "--confirm-marker-writes",
+            ]
+        )
+        print(f"To start the firmware, run with the same permissions:\n  {command}")
     return 0
 
 
 def parser():
     result = argparse.ArgumentParser(
         description=(
-            "Guarded V0114 sleep/profile installer/rollback for an already enumerated loader. "
-            "Only pages 0x1f00, 0x2200 and 0x2e00 are writable; metadata is never programmed. "
-            "Default/help does not access a device."
+            "Install or restore a V0114 profile while the device is in loader mode. "
+            "Writes pages 0x1f00, 0x2200 and 0x2e00. "
+            "Use tools/flash-firmware for guided entry, installation, and exit."
         ),
         epilog=(
-            "No automatic entry, exit, rollback, or retries. No force or arbitrary-image mode. "
-            "Reply timeout: 2 seconds. Close other device software; flock is advisory. "
-            "The candidate's sensor register-map assumption remains unconfirmed. "
+            "Close other firmware tools. The device stays in loader mode after installation. "
             + WARNING
         ),
     )
@@ -484,7 +504,7 @@ def parser():
             "--confirm-application-writes",
             action="store_true",
             required=True,
-            help="acknowledge application-page erase/program and application/recovery risks",
+            help="confirm erasing and writing application pages",
         )
         if operation == "install":
             command.add_argument(
@@ -492,7 +512,7 @@ def parser():
                 required=True,
                 type=Path,
                 metavar="FILE",
-                help="exact pinned sleep/profile binary; supplied manifests are not trusted",
+                help="built V0114 profile binary",
             )
         else:
             command.add_argument(

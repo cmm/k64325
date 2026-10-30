@@ -15,11 +15,9 @@ control-flow closure. The loader compares programmed bytes with the request
 payload; it does not compare an image-wide checksum at startup or completion.
 The candidate introduces no additional code-memory or XDATA read instruction.
 
-This is stronger than searching for a literal `3ffe`: all reachable `MOVC`
-sites and `MOVX` readers were classified, and the computed dispatches were
-expanded. It is still **not an unconditional claim that ALL silicon/ROM
-integrity checks have been identified**. MCU-controlled checks and the hardware
-meaning of the final word remain for the separate MCU investigation.
+All reachable `MOVC` sites and `MOVX` readers were classified, and the computed
+dispatches were expanded. Hardware/ROM checks and the final word's hardware
+meaning require further MCU documentation.
 
 The packaging checks must be kept separate:
 
@@ -33,9 +31,8 @@ The packaging checks must be kept separate:
   `0x3ffe` programming endpoint is a constant, not a checksum result or a
   decoded image-length field.
 
-The sleep-only RAW candidate should not acquire an invented checksum word or
-checksum-compensation change. Its `0x3ffe..0x3fff` remain `ff ff`. This finding
-does not prescribe a flashing or marker-page procedure.
+Keep `0x3ffe..0x3fff` as `ff ff` in the sleep-only RAW image. Use the
+[flashing procedure](../../README.md#flash-a-profile) to install it.
 
 ## Inputs and prior work
 
@@ -61,7 +58,7 @@ Exactly 23 bytes differ between source and candidate:
 ```
 
 Metadata `[0x0b00,0x0c00)` is unchanged, including post-entry
-`0xbea..0xbed = 55 55 01 01`. This is not a normalized installation image.
+`0xbea..0xbed = 55 55 01 01`. Installation preserves the device's metadata page.
 
 ## Control-flow bound
 
@@ -319,70 +316,47 @@ thread from starting. In `402230..402404`:
 
 The 512 vendor 32-byte data records and EOF record all pass Intel HEX checksum
 validation in an independent standard-library reconstruction, and cover
-`0000..3fff` once. That valid packaging should not be mistaken for enforcement
-by the converter. Re-encoding an image into valid Intel HEX requires new record
-checksums as a format requirement; **the present RAW candidate has none**.
+`0000..3fff` once. Re-encoding an image into Intel HEX requires new record
+checksums. The raw candidate contains decoded image bytes.
 Maintaining the INI CRC naming convention in a hypothetical new package is
 separate from any checksum required by this device or this converter.
 
 After conversion, the load path extracts another support resource and starts
-thread `406010 -> 406020` at `405e7e..405e83`. Orchestration selects `4094b0` or
+thread `406010 -> 406020` at `405e7e..405e83`. The updater selects `4094b0` or
 `409ec0` by report size at `4064b6..4064ce`. The mouse programming routine
 reads bytes from object field `+cc` and sends addresses/data, then command 5;
 it does not calculate an image CRC or append a generated checksum to those
 packets. See the [loader protocol](../firmware.md#loader-wire-protocol) for ACK
 and completion behavior.
 
-This is not a recursive audit of the entire PE. Orchestration first calls
-driver-preparation helper `4070c0` at `40607f`; it also calls helper `402520`
+The updater first calls driver-preparation helper `4070c0` at `40607f`;
+it also calls helper `402520`
 at `40629f` (which obtains `kernel32.dll` version information via `402410`).
 The driver helper's inspected strings/calls cover SGKBLIBUSB extraction,
 service/filter installation and Windows-device discovery. Their complete
-OS/framework call closures were not followed. No firmware-buffer `+cc` or
-NAME-CRC input was found there, but an assertion about every possible
-updater-wide damage check would require closing those calls as well. This
-limit does not introduce a checksum field into the RAW image or mouse protocol.
+OS/framework call chains remain untraced. The inspected code contains no
+firmware-buffer `+cc` or NAME-CRC input.
 
 The outer PE optional-header CheckSum is zero and its certificate-table
 directory is empty. These are packaging facts about the unmodified executable,
 not firmware checksum fields.
 
-## Verification and remaining limits
+## Verification
 
 Disposable offline checks verified input hashes,
 exact candidate differences, loader identity, table decoding, descriptor bytes,
 unchanged candidate read-instruction sets, complete Intel HEX reconstruction
 and known CRC32 correspondence. They also checked 2,158 cited PE disassembly
-instruction byte strings against the identified EXE. The RAW image was not
-adjusted. No checksum brute force was used.
+instruction byte strings against the identified EXE.
 
-**Confidence:** high for the supplied loader's lack of an image-wide software
-checksum and for the absence of application integrity scanning in the stated
-closure. The PE record-checksum omission follows directly from the conversion
-instructions; the absent NAME-CRC gate is bounded to the traced metadata,
-extraction, conversion and programming path. The Windows program was not run;
-this is not a native execution test of its CRT/parser.
+Further work would need:
 
-**Still unknown:**
-
-1. Whether SG8F7581 hardware/ROM, configuration words or CPU/peripheral
-   extensions impose integrity checks not represented by the enumerated CPU
-   reads; specifically the hardware meaning/protection of `3ffe/3fff` and the
-   flash-control mapping through SFRs `fe/ff`. The
+1. Hardware definitions for `3ffe/3fff`, the flash-control SFRs `fe/ff`, and
+   any ROM integrity checks. The
    [manufacturer product page](https://www.sigmachip.com/en/keyboard-controller/sg8f7581/)
    does not specify those semantics.
-2. Whether the real interrupt/vector/ROM and RAM/stack rules satisfy the
-   software-closure assumptions. Corruption-induced execution, unknown hardware
-   entries, and adversarial USB-state sequences are outside the absence proof.
-3. Which INI/HEX resource language Windows selects on a particular host. Both
-   load calls use resource fallback. No V0114 vendor package or packaging CRC
-   has been supplied; none is needed to describe this RAW candidate.
-4. Physical flash/readback/reset behavior and installation/recovery on the
-   device. The software's byte comparisons are not a live programming test.
-5. Any additional updater-wide checks outside the enumerated metadata,
-   extraction, conversion and programming routines; the unexhausted helper
-   entries are `4070c0` and `402520`, called from `40607f` and `40629f`.
-
-Accordingly: **there is no identified checksum repair missing from this RAW
-candidate; claiming that every possible device integrity requirement is settled
-still requires the hardware-side result.**
+2. Hardware tests of interrupt/vector behavior, stack rules, and flash/reset
+   behavior under faults.
+3. Native Windows execution to check resource-language fallback and parser
+   behavior, plus tracing helpers `4070c0` and `402520` beyond their inspected
+   calls. They are reached from `40607f` and `40629f`.

@@ -13,16 +13,14 @@ After queuing a report, the main loop immediately acquires another sensor
 sample for the next report. Faster host transactions can therefore cause
 faster fresh acquisitions with the existing internal scheduler.
 
-The descriptor-only candidates at `0x1f36` (`0a -> 04/02/01`) are the first
-experiments supported by this dataflow. No additional internal timing edit is
-indicated before those trials. This does **not** establish sustained fresh
-1 kHz data: sensor acquisition, report processing, interrupt load, sensor frame
-rate, and sleep state still limit it. Descriptor/bus/host compatibility is
+The descriptor-only candidates at `0x1f36` (`0a -> 04/02/01`) use this existing
+dataflow. Throughput depends on sensor acquisition, report processing,
+interrupt load, sensor frame rate, and sleep state. Descriptor/bus/host compatibility is
 covered in the [USB analysis](v0114-polling-usb.md).
 
-Do not shorten the timer merely to accompany a shorter descriptor interval.
-It also permits processing while an earlier report is pending, and the report
-routine can discard accumulated data when the endpoint is not ready.
+Keep the timer fallback unchanged: it permits processing while an earlier
+report is pending, and the report routine can discard accumulated data when
+the endpoint is busy.
 
 ## Timer and main-loop gates
 
@@ -56,11 +54,8 @@ increment path executes 24 instructions; that is not a clock-cycle or time
 measurement. Startup calls setup through `295c 12 28 d4`; suspend disables the
 interrupt at `1059`, and wake reenables it at `10f2`.
 
-**No timer-input frequency was established.** In particular, `8e=05` and clock
-setup writes at `279f..27b2` do not supply a named divider/oscillator mapping.
-Neither 5,000 counts nor three interrupts can be converted to milliseconds
-from the available sources. V0116 address/timing notes were not used for that
-conversion.
+The timer-input frequency is unknown. Converting counts to milliseconds needs
+the divider/oscillator mapping for `8e=05` and the clock setup at `279f..27b2`.
 
 USB main loop (`RAM 3e == 1`, branch at `1689..168f`):
 
@@ -132,10 +127,9 @@ Consequences:
   token. The completion-driven sequence is enqueue -> acquire -> wait for completion ->
   enqueue acquired data. The timeout path can acquire before enqueue instead.
 - There is one report buffer and a software accumulator, not a queue of all
-  sensor samples. Unchanged inputs need not generate reports at the host's
-  polling frequency. Counting host polls alone does not establish fresh data.
+   sensor samples. Unchanged input is suppressed.
 - Forcing the timeout sooner can make changed data reach the busy-endpoint
-  clearing path. It is not a general rate-increase fix.
+   clearing path and lose motion.
 
 ## Acquisition and other consumers
 
@@ -162,9 +156,8 @@ completion/timer path. Do not patch that literal to change USB reporting.
 Conditional on the [PAW3205DB-TJ3T V0.2 map](https://github.com/Li-Dongze/paw3205_mouse/blob/main/PAW3205DB-TJ3T_SPEC_V0.2.pdf):
 status reads freeze X/Y before they are read; normal AFC uses
 2400/1200/800 frames/s. The sleep candidate retains AFC and sleep1,
-whose documented default sampling interval is 32 ms. Thus 1,000 serial acquisitions
-per second would not guarantee 1,000 distinct optical frames or remove sleep1
-wake latency. The installed sensor suffix/register map remains unconfirmed.
+whose documented default sampling interval is 32 ms. Optical sampling and
+sleep1 wake latency therefore remain separate from the acquisition rate.
 
 ## Bounded operand candidates, if measurements require them
 
@@ -177,7 +170,7 @@ wake latency. The installed sensor suffix/register map remains unconfirmed.
 
 Clock-independent examples: 5,000 counts uses TH:TL `ec:78`; 2,500 `f6:3c`;
 1,250 `fb:1e`; 1,000 `fc:18`; 500 `fe:0c`. These give nominal timer-frequency
-ratios 1, 2, 4, 5, 10 before latency. They are **not** verified report rates.
+ratios 1, 2, 4, 5, 10 before latency.
 With threshold 2, a timeout still needs three increments. Lowering the
 threshold alone offers at most a three-to-one reduction in that count, not a
 ten-to-one increase in normal host-driven throughput.
@@ -185,19 +178,17 @@ ten-to-one increase in normal host-driven throughput.
 The timer's only identified application counter is `6e:6f`; buttons, wheel,
 retry delays, and the pending/error loop do not share its ticks. Faster timer
 interrupts nevertheless consume CPU and can interrupt GPIO sensor transactions.
-Do not change `8e`, oscillator/divider writes, or sensor delay operands without
-their hardware timing meanings. If faster host polls still fail to yield fresh
-data, there is no demonstrated universal extra byte edit: distinguish endpoint
-readiness/completion, acquisition execution time, and optical/sleep limits
-before choosing an internal patch.
+Changes to `8e`, oscillator/divider writes, or sensor delay operands require
+their hardware timing definitions. Measure endpoint readiness, acquisition
+execution time, and optical/sleep behavior to identify the limiting stage.
 
-## Checks and remaining uncertainty
+## Checks
 
 - All 4,357 unique instructions in the targeted disassembly matched the original
   raw bytes. Control-flow conclusions use identified routines, not descriptor
   data that the linear decoder also presents as instructions.
 - Disposable instruction-model probes checked 131,072
-  subtraction/carry cases check its comparison extension. Thirty-six actual-byte
+   subtraction/carry cases for the comparison extension. Thirty-six actual-byte
   main-gate cases confirm completion-cleared bypass and the two-acquisition
   timeout route. Timer tests confirm saturation; report-tail tests confirm
   ready/busy writes and clearing; button tests confirm 20-call debounce. Two
@@ -205,11 +196,9 @@ before choosing an internal patch.
   delta accumulation for both accepted IDs.
 - Scheduler probes stub sensor acquisition/report processing; those paths are
   exercised separately. Acquisition probes stub wheel service and short delays.
-  No probe simulates hardware event timing, clock frequency, host transactions,
-  optical processing, or concurrent interrupts. Sustained 1 kHz throughput is
-  unresolved; no device symptom or rate was measured here.
+  Hardware event timing, host transactions, optical processing, and concurrent
+  interrupts require separate device measurements.
 - Original SHA256 remains
   `c916f7f222b2991adad2816d467868ee73c828e48c17299270a84de5d2bcd6d1`.
   Existing sleep-candidate SHA256 remains
   `7c1bd5139abaf5b7100b4779b228438361804aae82e595e2f19e3c3d4038a074`.
-  No candidate binary was emitted or modified.

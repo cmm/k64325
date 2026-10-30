@@ -1,7 +1,6 @@
 # Firmware and protocol notes
 
-These notes describe the hash-pinned V0114 image supported by the tools. USB
-release `0114` is an advertised version field, not proof of identical code.
+These notes describe the V0114 image identified by the hashes below.
 Addresses below are byte offsets in the 16 KiB flash image; range ends are
 exclusive.
 
@@ -24,8 +23,8 @@ Detailed analysis:
 The original was obtained as two matching full readbacks from a wired K64325
 advertising `047d:1020`, `bcdDevice=0114`. The second read used reverse chunk
 order. Its loader bytes match the loader in Kensington's V0116 update image.
-That comparison does not make the applications interchangeable: V0114 drives
-sensor data on P0.1; the analyzed V0116 drives it on P0.2.
+The applications use different sensor data pins: P0.1 in V0114 and P0.2 in
+the analyzed V0116.
 
 The tested controller is marked SG8F7581. The sensor-board marking
 `MS-6070U-3205_Sensor` points to the PAW3205 family, but the sensor package/suffix
@@ -67,8 +66,8 @@ initialization path already has a deeper call chain, so its overall foreground
 maximum is unchanged. Instruction-model comparisons checked register/PSW and
 live-stack preservation for both configuration values. The data-pin latch may
 end differently after the added transaction; the transmitter releases that pin
-after each byte. Physical timing and the exact sensor register map remain
-hardware assumptions, despite the successful idle and resume tests on one unit.
+after each byte. Idle and resume tests passed on the tested unit; the register
+interpretation uses the PAW3205DB-TJ3T map cited above.
 
 ## Optional polling profiles
 
@@ -93,7 +92,6 @@ at USB low speed. Sub-10-ms interrupt intervals are nonstandard at that speed;
 explicitly accepts them for overclocked devices.
 [Linux xHCI](https://github.com/torvalds/linux/blob/master/drivers/usb/host/xhci-mem.c)
 rounds the original 10 ms request down to 8 ms and represents 4/2/1 ms directly.
-This is host scheduling behavior, not a measured device report rate.
 
 There is no fixed 100 Hz software sampling gate in the traced USB path.
 Endpoint completion at `0x2885` clears pending flag RAM `0x6c.1`, bypassing the
@@ -103,9 +101,9 @@ fallback applies while a report remains pending. Shortening that fallback can
 discard accumulated changes when the endpoint is busy, so these profiles leave
 it alone.
 
-Faster polling can therefore increase acquisitions, but sustained fresh 1 kHz
-reports remain unverified. Unchanged inputs need not produce reports. Sensor
-frame rate, acquisition time, and interrupt load can limit throughput. Button
+Faster polling can therefore increase acquisitions. The firmware suppresses
+unchanged input; sensor frame rate, acquisition time, and interrupt load limit
+throughput. Button
 debounce requires 20 stable main-loop calls, and recovery delays also count
 calls; their wall times can change with workload.
 
@@ -131,11 +129,8 @@ display. The documented PAW3205DB-TJ3T configuration register `0x06`, bits
 | `0x04` | 1,600 |
 
 The original initializer chooses `0x00` for sensor ID `0x30` and `0x01` for ID
-`0x31`. These are programmed configuration values, not an identified physical
-resolution ceiling. The exact installed sensor variant remains unconfirmed;
-the table describes the cited sensor map, not measured CPI on this trackball.
-The specification also does not establish how much additional independently
-resolved detail its higher-CPI settings provide.
+`0x31`. The table describes the cited sensor map. Measuring effective CPI and
+the smallest reliably detected movement requires known ball-surface travel.
 
 The builder accepts `stock` or any explicit CPI in the table above, independently
 of the polling selection. `stock` leaves both original CPI instructions intact.
@@ -163,8 +158,7 @@ explains why the returned flag has no identified consumer before being redefined
 All six CPI selections combine with each of the four polling intervals. The
 generator and installer pin complete image hashes for all 24 profiles. The
 [build command](../README.md#build-a-cpipolling-profile) names files using the
-requested CPI and descriptor interval; a name does not assert measured CPI or
-report cadence.
+selected CPI setting and descriptor interval.
 
 ## How resolution and rates interact
 
@@ -173,16 +167,14 @@ The following quantities describe different parts of the motion path:
 | Quantity | Meaning |
 | --- | --- |
 | Optical frame rate | How frequently the sensor images the surface. The cited map's adaptive frame-rate control uses 800, 1,200, or 2,400 frames/s during normal operation. |
-| CPI | How many movement counts the sensor reports per inch of surface travel. This is a spatial scale, not a frequency. |
-| Acquisition rate | How frequently firmware reads sensor deltas. The completion-driven scheduler and its fallback determine this; the descriptor alone does not. |
+| CPI | Movement counts per inch of surface travel past the sensor. |
+| Acquisition rate | How frequently firmware reads sensor deltas, driven by endpoint completion and the timer fallback. |
 | USB polling rate | How frequently the host offers the interrupt endpoint a transfer opportunity. The device can respond with no data. |
-| Input-report rate | How frequently reports actually reach the host. Unchanged input is suppressed; `evhz` measures host input-event cadence rather than optical frames or empty USB polls. |
+| Input-report rate | How frequently reports reach the host. Unchanged input is suppressed. `tools/measure-motion` measures delivery timestamps. |
 | Display refresh rate | How frequently the display presents a new frame. It is independent of sensor CPI and USB polling. |
 
 The owner measured approximately 250 Hz with `evhz` during movement using the
-4 ms polling profile. That observation supports increased delivered input
-cadence on the tested unit; it does not establish the optical frame rate or
-effective CPI.
+4 ms polling profile.
 
 For an idealized example at 800 CPI and one inch/second of ball-surface travel,
 the sensor produces 800 counts/second. Delivered at 125, 250, 500, and 1,000
@@ -202,10 +194,8 @@ Sensor deltas and USB X/Y reports are signed eight-bit quantities, and the
 firmware saturates accumulated X/Y motion at -127/+127. Higher CPI increases
 the counts accumulated between reads/reports and can reach those limits
 sooner during fast motion. Faster acquisition/reporting reduces that pressure,
-but does not establish that the sensor or host can sustain any requested rate.
-The sleep fix retains adaptive frame-rate control and sleep1, so it also does
-not promise a new optical frame on every 1 ms poll or eliminate sleep1 wake
-latency.
+subject to the sensor and firmware throughput limits. The sleep fix retains
+adaptive frame-rate control and sleep1 wake latency.
 
 ## Flash layout and entry/exit
 
@@ -277,7 +267,7 @@ needs updating for these changes.
 The vendor updater erases the final page but omits programming `0x3ffe/0x3fff`,
 leaving `ff ff`. Neither the application nor loader uses that word as a checksum.
 The original and patched images retain it unchanged. Its hardware purpose is
-unknown; it must not be replaced with a guessed checksum.
+unknown; preserve `ff ff` when modifying the image.
 
 The vendor package uses Intel HEX record checksums and a HEX-text CRC32 naming
 suffix. Those are outside the decoded raw image; the traced converter and
@@ -285,6 +275,5 @@ programming path do not enforce them. This project generates a raw image and
 does not rebuild the vendor package.
 
 The [SG8F7581 product page](https://www.sigmachip.com/en/keyboard-controller/sg8f7581/)
-documents 16 KiB flash, 256-byte pages, and selected-region IAP. It does not
-define hardware/ROM integrity checks or the final word. The software findings
-are not a proof about undocumented silicon behavior.
+documents 16 KiB flash, 256-byte pages, and selected-region IAP. Hardware/ROM
+integrity checks and the final word's purpose require further hardware documentation.

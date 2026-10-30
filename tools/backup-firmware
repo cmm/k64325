@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Guided firmware backup; --help performs no hardware access."""
+
+import sys
+
+from k64325_workflow import main
+
+if __name__ == "__main__":
+    sys.exit(main("backup"))

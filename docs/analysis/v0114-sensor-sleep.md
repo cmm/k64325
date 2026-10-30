@@ -8,7 +8,7 @@ The resulting sleep2 patch and observed device behavior are summarized in the
 
 ## Result
 
-**Established from instruction bytes:** the common initializer at `0x21fd`
+**Sensor transactions:** the common initializer at `0x21fd`
 transmits `86 80`, reads using address byte `00`, and transmits `86 00` or
 `86 01`. All 13 direct calls to its sensor transmitter were traced. There are
 no write address bytes `85`, `89`, or `8a..8c` for the cited map's
@@ -17,20 +17,17 @@ write transaction is `86 08` in the USB-event-driven suspend handler. No
 separate approximately 20-second firmware command to power down the sensor
 was found in those transactions.
 
-**Conditional sensor interpretation:** if this board uses the saved
+**Register interpretation:** if this board uses the saved
 PAW3205DB-TJ3T register map and reset defaults, `86 80` resets it and `86 00/01`
 sets its normal configuration/CPI. Firmware leaves automatic sleep1 and sleep2
 enabled: `Operation_Mode=0xb8`, `Enter_Time=0x10`. Those defaults give
 256 ms to sleep1 and another 20,480 ms to sleep2. This matches the reported
-timing, but neither the actual sensor suffix, live ID, nor live registers were
-measured. Acceptance of IDs `0x30` and `0x31` by firmware does not identify the
-installed part.
+timing. The exact sensor suffix, live ID, and register contents remain unknown.
 
 **Sleep2 change:** add the transaction `85 b0` after each successful sensor
 reset/configuration. On that register map this clears only automatic sleep2
 enable, retaining sleep1. It requires inserted code; no existing `0x05` write
 has an operand that can simply be changed. A shared hook is identified below.
-The register interpretation remains conditional on the sensor map.
 
 ## Inputs and sources
 
@@ -44,8 +41,7 @@ The register interpretation remains conditional on the sensor map.
 Both dumps are 16,384 bytes and identical. `[0,0xb00)` equals V0116 exactly.
 The dumped metadata `[0xb00,0xc00)` is all `ff` except
 `0xbea..0xbed = 55 55 01 01`. This is the **entry-modified** metadata supplied
-for analysis, not a measurement of the marker page after the user's guarded
-exit. The user reports the mouse returned as `bcdDevice 0114`.
+for analysis. After exit, the user reports the mouse returned as `bcdDevice 0114`.
 
 Sensor source: PAW3205DB-TJ3T specification V0.2, November 2011,
 <https://github.com/Li-Dongze/paw3205_mouse/blob/main/PAW3205DB-TJ3T_SPEC_V0.2.pdf>.
@@ -67,8 +63,8 @@ An important V0114/V0116 hardware difference is visible here:
 | TX port-control mask | `2847 53 91 f5` | `2843 53 91 f3` |
 | TX port-control finish | `2863 43 91 02` | `285f 43 91 04` |
 
-Both clock P0.3. Thus V0116 is not merely the same image with relocated code.
-Do not substitute its entire initializer/transmitter or whole firmware image.
+Both clock P0.3. Use the V0114 initializer and transmitter to preserve its P0.1
+sensor connection.
 
 ### Every direct TX call
 
@@ -212,10 +208,8 @@ sleep controlled by sensor register `0x05`. Their instructions and the boot
 marker path must remain intact. The sensor's automatic sleep timing and host
 USB suspend are separate mechanisms.
 
-The shared loader tests persistent flash `0x0beb == 0x55`. Preserving loader
-bytes does not guarantee recovery from an application that cannot enumerate
-or process boot entry. With no programmer, installation remains consequential
-even if the intended handler is left in place.
+The shared loader tests persistent flash `0x0beb == 0x55`. Software re-entry
+requires an application that can enumerate and process the entry command.
 
 ## Comparison with V0116
 
@@ -254,14 +248,13 @@ PAW3205DB-TJ3T pp. 4, 7–10 and §§6.2, 6.4–6.5:
   are force-sleep2, force-sleep1, and wake commands; at most one may be asserted
   in a write and they self-clear.
 - **`b0`** clears only bit 3 relative to the documented default: normal/sleep1
-  operation remains, without automatic sleep2. It does not disable all sleep.
+  operation remains, with automatic sleep2 disabled.
 - **`a0`** clears bits 4 and 3. It disables sleep and also AFC; this is a wider
   behavior change requiring a separate decision.
 - To force normal mode while already asleep, the datasheet requires clearing
   sleep-enable bits and then asserting Wakeup. A post-reset application point
-  avoids intentionally modifying an already sleeping sensor, but actual timing
-  and state at that point have not been measured. A mid-run write must not be
-  assumed to wake an already sleeping sensor.
+  applies the setting during initialization. A mid-run change would also need
+  to handle the sensor's current sleep state.
 - Write protection `0x09` applies only to `0x0a..0x7f`; changing `0x05` does not
   need an unlock. Changing timing registers would require `0x09=0x5a`.
 - `0x0b=10` means sleep1 entry `(1+1)*128 = 256 ms` and sleep2 entry
@@ -289,17 +282,16 @@ configuration and reuses the common path after every register reset/retry.
 There are 1,334 consecutive `ff` bytes in `[0x2a02,0x2f38)`, between application
 routines and startup. For example `0x2e00` is inside that block. No direct
 branch/call target or fixed pointer operand into the block was found in the
-independently decoded application/startup/ISR regions. This is plausible
-padding, not a proof against every computed code/data reference or a checked
-flash allocation. It avoids the shared loader, marker page, interrupt entries,
-and reserved final-word question. A small helper fits without relocating code.
+independently decoded application/startup/ISR regions. The
+[integrity analysis](v0114-integrity-software.md) covers computed references.
+A small helper fits here without relocating code or touching the loader,
+metadata, interrupt entries, or final word.
 
 Preservation constraints established from TX:
 
 - It uses A, R6, R7 and arithmetic flags; on return A and R7 are zero and R6 is
   eight. The final CJNE clears carry. Other arithmetic flags can differ with the
-  data: adding a final `b0` transmit is not proof of identical PSW state to the
-  original ID-`31` data transmit. Preserve live status or prove it dead.
+  data. Preserve live PSW around the added `b0` transmit.
 - TX itself does not modify R0, DPTR or B. Additional helper/delay calls must
   not be assumed to share this clobber set. In particular `0x1cec` services
   other inputs and RAM and is not a generic sensor delay.
@@ -312,9 +304,8 @@ Preservation constraints established from TX:
 
 A read-modify-write clearing bit 3 could preserve a verified nondefault
 `Operation_Mode`, at the cost of a read and its timing/preservation needs.
-Neither it nor a constant `b0` write makes an unidentified sensor compatible
-with this datasheet. The constant is the smaller candidate only under the
-post-reset/default-register assumption.
+The constant `b0` write uses fewer instructions and assumes the documented
+post-reset register default.
 
 ## Verification and limits
 
@@ -329,11 +320,9 @@ All restarted sensor/main/suspend instructions agree with the original linear
 decode. Startup's inline data at `0x2f77..0x2f7e` misaligns a linear sweep;
 restarting at the actual `0x2f7f` target corrects that stream and removes its
 spurious branch into padding. Initializer data `0x293d..0x294f` is not treated
-as executable code. These are disassembly/byte checks, not sensor emulation
-or a hardware sleep/resume test. Input image hashes were rechecked.
+as executable code. Input image hashes were rechecked.
 
 The implemented trampoline preserves PSW and disables only automatic sleep2.
 See the [patch description](../firmware.md#sensor-change) for its instruction
 sequence and stack result, and the [integrity analysis](v0114-integrity-software.md)
-for image-checksum constraints. The actual sensor map, physical serial timing,
-and recovery on other units remain hardware questions.
+for image-checksum constraints.

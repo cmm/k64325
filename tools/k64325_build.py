@@ -9,23 +9,24 @@ import k64325_patch_sleep as patch
 
 POLL_INTERVALS_MS = {100: 10, 250: 4, 500: 2, 1000: 1}
 RATE_WARNING = (
-    "Poll rates are nominal bInterval requests: 100 Hz selects 10 ms, "
-    "not a measured Linux report rate."
+    "Poll-rate settings select USB intervals: 100/250/500/1000 Hz request 10/4/2/1 ms."
 )
 WARNINGS = (
-    *patch.WARNINGS,
-    patch.POLLING_WARNING,
-    patch.CPI_WARNING,
+    "Automatic sleep2 is disabled; sleep1 stays enabled.",
+    "Use tools/measure-motion to measure effective CPI and report delivery rate.",
     RATE_WARNING,
 )
 
 
+def profile_stem(cpi, poll_rate_hz):
+    interval = POLL_INTERVALS_MS[poll_rate_hz]
+    return f"k64325-v0114-no-sleep2-cpi-{cpi}-poll-{interval}ms"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description=(
-            "Build a hash-pinned V0114 automatic-sleep2 profile offline. No USB access."
-        ),
-        epilog="\n".join(f"WARNING: {warning}" for warning in WARNINGS),
+        description=("Build a V0114 firmware profile with automatic sleep2 disabled."),
+        epilog="\n".join(WARNINGS),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -38,7 +39,7 @@ def main(argv=None):
         "--cpi",
         required=True,
         choices=("stock", *(str(cpi) for cpi in patch.CPI_CHOICES)),
-        help="stock ID-dependent configuration or requested experimental CPI override",
+        help="sensor CPI setting, or stock configuration",
     )
     parser.add_argument(
         "--poll-rate-hz",
@@ -59,7 +60,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     interval = POLL_INTERVALS_MS[args.poll_rate_hz]
     cpi = None if args.cpi == "stock" else int(args.cpi)
-    stem = f"k64325-v0114-no-sleep2-cpi-{args.cpi}-poll-{interval}ms"
+    stem = profile_stem(args.cpi, args.poll_rate_hz)
     directory = args.out_root / stem
     try:
         source = patch.load_source(args.input)
@@ -69,14 +70,9 @@ def main(argv=None):
     except (OSError, patch.PatchError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    for warning in (*manifest["warnings"], RATE_WARNING):
-        print(f"WARNING: {warning}", file=sys.stderr)
-    print(f"offline_candidate: {directory / manifest['output']['file']}")
-    print(f"manifest: {directory / 'manifest.json'}")
-    print(f"source SHA256: {manifest['source']['sha256']}")
-    print(f"output SHA256: {manifest['output']['sha256']}")
-    print(f"Selected CPI: {args.cpi}")
-    print(f"USB descriptor bInterval: {interval} ms")
+    print(f"Firmware: {directory / manifest['output']['file']}")
+    print(f"Manifest: {directory / 'manifest.json'}")
+    print(f"CPI setting: {args.cpi}; USB interval: {interval} ms")
     return 0
 
 
