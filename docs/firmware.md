@@ -155,10 +155,49 @@ does not add an accumulator dependency. Transmitted data can change PSW's
 overflow flag; the [CPI analysis](analysis/v0114-cpi.md#overflow-flag-difference)
 explains why the returned flag has no identified consumer before being redefined.
 
-All six CPI selections combine with each of the four polling intervals. The
-generator and installer pin complete image hashes for all 24 profiles. The
-[build command](../README.md#build-a-cpipolling-profile) names files using the
-selected CPI setting and descriptor interval.
+All six CPI selections combine with each of the four polling intervals and
+both motion-gain settings. The generator and installer pin complete image
+hashes for all 48 profiles. The [build command](../README.md#build-a-cpipolling-profile)
+names files using the
+selected CPI setting and descriptor interval, appending `-no-motion-gain` for
+unity gain. The 24 default-gain profiles retain their existing names, image
+hashes, and manifests.
+
+## Firmware motion gain
+
+The USB motion routine at `0x178f` maps sensor `(X, Y)` to `(Y, -X)`, then
+multiplies each axis by 9/16 before placing the deltas in USB reports. For each
+axis it computes `9 * delta + remainder`, divides by 16 with truncation toward
+zero, and carries the signed remainder to the next call. Sixteen sensor counts
+therefore produce nine reported movement counts; this describes displacement,
+not the number of USB reports. Fractional movement accumulates rather than
+being rounded away independently on each call.
+
+Assuming the cited sensor map, known surface travel, and no lost counts:
+
+| Sensor CPI | USB CPI with default 9/16 gain | USB CPI with unity gain |
+| --- | --- | --- |
+| 600 | 337.5 | 600 |
+| 800 | 450 | 800 |
+| 1,000 | 562.5 | 1,000 |
+| 1,200 | 675 | 1,200 |
+| 1,600 | 900 | 1,600 |
+
+The build, patch, and guided flash commands accept `--no-motion-gain` to select
+unity gain. It changes two multiplier operands within page `0x1700`:
+
+| Instruction range | Default | Unity gain |
+| --- | --- | --- |
+| `[0x17ae,0x17b0)` | `7d 09` — `MOV R5,#9` | `7d 10` — `MOV R5,#16` |
+| `[0x17ed,0x17ef)` | `7d 09` — `MOV R5,#9` | `7d 10` — `MOV R5,#16` |
+
+The divisor remains 16, so the resulting gain is 16/16. Axis mapping,
+instruction lengths, sensor configuration, and USB polling interval are
+unchanged by this option. Startup clears the fractional state; with unity
+gain, integer deltas leave it at zero. The unity-gain manifest records the
+numerator and denominator. Omitting the flag selects the original 9/16 gain;
+installing that profile restores the multiplier bytes. Rollback to either the
+original image or a stock-CPI sleep/poll baseline also restores the default gain.
 
 ## How resolution and rates interact
 
@@ -167,7 +206,8 @@ The following quantities describe different parts of the motion path:
 | Quantity | Meaning |
 | --- | --- |
 | Optical frame rate | How frequently the sensor images the surface. The cited map's adaptive frame-rate control uses 800, 1,200, or 2,400 frames/s during normal operation. |
-| CPI | Movement counts per inch of surface travel past the sensor. |
+| Sensor CPI | Sensor movement counts per inch of surface travel past the sensor. |
+| Firmware motion gain | Scales the movement values sent in USB reports: 9/16 by default, or unity with `--no-motion-gain`. |
 | Acquisition rate | How frequently firmware reads sensor deltas, driven by endpoint completion and the timer fallback. |
 | USB polling rate | How frequently the host offers the interrupt endpoint a transfer opportunity. The device can respond with no data. |
 | Input-report rate | How frequently reports reach the host. Unchanged input is suppressed. `tools/measure-motion` measures delivery timestamps. |
@@ -176,9 +216,11 @@ The following quantities describe different parts of the motion path:
 The owner measured approximately 250 Hz with `evhz` during movement using the
 4 ms polling profile.
 
-For an idealized example at 800 CPI and one inch/second of ball-surface travel,
-the sensor produces 800 counts/second. Delivered at 125, 250, 500, and 1,000
-reports/second, this averages 6.4, 3.2, 1.6, and 0.8 counts per report. Faster
+For an idealized example at 800 sensor CPI and one inch/second of ball-surface
+travel, the sensor produces 800 counts/second. The default gain reduces this to
+450 reported movement counts/second. Delivered at 125, 250, 500, and 1,000
+reports/second, this averages 3.6, 1.8, 0.9, and 0.45 counts per report. With
+unity gain, the corresponding averages are 6.4, 3.2, 1.6, and 0.8. Faster
 reporting can distribute movement into smaller, more frequent updates. At very
 slow movement, individual counts arrive less frequently than polling
 opportunities; faster polling cannot subdivide a sensor count.
@@ -187,12 +229,13 @@ Increasing CPI produces more counts for the same ball rotation. Reducing
 constant desktop pointer gain can keep cursor travel comparable while using
 those smaller movement increments. With an adaptive acceleration profile,
 gain also depends on movement speed, so a desktop speed setting is not a
-direct CPI ratio. Hardware CPI, host gain, and acceleration must be considered
-separately when comparing tracking precision.
+direct CPI ratio. Sensor CPI, firmware gain, host gain, and acceleration must
+be considered separately when comparing tracking precision.
 
 Sensor deltas and USB X/Y reports are signed eight-bit quantities, and the
-firmware saturates accumulated X/Y motion at -127/+127. Higher CPI increases
-the counts accumulated between reads/reports and can reach those limits
+firmware saturates accumulated X/Y motion at -127/+127 before applying gain.
+Removing the gain does not recover motion lost to that saturation. Higher CPI
+increases the counts accumulated between reads/reports and can reach those limits
 sooner during fast motion. Faster acquisition/reporting reduces that pressure,
 subject to the sensor and firmware throughput limits. The sleep fix retains
 adaptive frame-rate control and sleep1 wake latency.
@@ -243,8 +286,9 @@ Protocol constraints enforced by the host tools:
 - Programming uses even addresses and even counts of 2–58 bytes. The loader
   programs pairs; an odd count would write one extra byte.
 - Erase page numbers are relative to `0x0c00`. The installer's only page
-  numbers are `0x13`, `0x16`, and `0x22`, corresponding to descriptor page
-  `0x1f00`, hook page `0x2200`, and trampoline page `0x2e00`.
+  numbers are `0x0b`, `0x13`, `0x16`, and `0x22`, corresponding to gain page
+  `0x1700`, descriptor page `0x1f00`, hook page `0x2200`, and trampoline page
+  `0x2e00`. It skips pages whose contents already match the target.
 - Erase ACK verifies only the first two erased bytes. The installer checks all
   256 bytes before programming. Program ACK follows pair-by-pair comparison;
   the installer additionally verifies each page and two complete final images.

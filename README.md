@@ -114,12 +114,17 @@ with the device back in application mode.
 | --- | --- |
 | `--cpi` | `stock`, `600`, `800`, `1000`, `1200`, `1600` |
 | `--poll-rate-hz` | `100`, `250`, `500`, `1000` |
+| `--no-motion-gain` | Use unity motion gain instead of the default 9/16 reduction |
 | `--out-root` | Build and transaction directory; default `work` |
 | `--force-build` | Archive the cached build and generate it again |
 
 CPI labels select sensor register values from the PAW3205DB-TJ3T map; the exact
-sensor variant is unidentified. Measure effective sensitivity with
-[`measure-motion`](#measure-motion).
+sensor variant is unidentified. By default, firmware multiplies sensor movement
+by 9/16 before USB reporting: a nominal 1600 sensor CPI becomes 900 USB CPI.
+Add `--no-motion-gain` to preserve the movement counts, increasing reported
+movement by 16/9 at the same sensor setting. This does not change the polling
+interval or axis mapping. See [firmware motion gain](docs/firmware.md#firmware-motion-gain)
+and measure effective sensitivity with [`measure-motion`](#measure-motion).
 
 The poll-rate settings request USB intervals of 10, 4, 2, or 1 ms. Linux xHCI
 schedules the 10 ms setting at 8 ms, giving 125 polling opportunities per second.
@@ -127,8 +132,10 @@ Intervals below 10 ms are experimental for this low-speed USB device. See
 [polling experiments](#polling-experiments) for timing details.
 
 Builds are stored under names such as
-`work/k64325-v0114-no-sleep2-cpi-1600-poll-4ms/`. Each flash gets a new
-`work/flash-TIMESTAMP-RANDOM/` directory containing:
+`work/k64325-v0114-no-sleep2-cpi-1600-poll-4ms/`. Unity-gain builds append
+`-no-motion-gain` to the directory and binary names, keeping their cache separate.
+Omit the flag on a subsequent flash to restore the default gain. Each flash gets
+a new `work/flash-TIMESTAMP-RANDOM/` directory containing:
 
 ```text
 workflow.jsonl
@@ -140,7 +147,8 @@ install/
 
 Keep the logs and readbacks. `after/` contains the verified installed image;
 `before/` records the starting state. The installer preserves loader and
-metadata pages and writes changed pages from `0x1f00`, `0x2200`, and `0x2e00`.
+metadata pages and writes changed pages from `0x1700`, `0x1f00`, `0x2200`, and
+`0x2e00`. Changing the motion gain writes page `0x1700`.
 
 After flashing, check motion, buttons, scrolling, response after 60 seconds
 idle, and suspend/resume.
@@ -155,6 +163,9 @@ python3 tools/k64325_build.py \
   --input "$BACKUP/dump-1.bin" \
   --cpi 1600 --poll-rate-hz 250
 ```
+
+The standalone builder also accepts `--no-motion-gain`. Use the same flag when
+flashing to select that build.
 
 The profile directory contains the named `.bin` and a manifest with hashes and
 byte changes. The standalone builder requires a new profile directory. The

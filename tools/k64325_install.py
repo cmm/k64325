@@ -17,10 +17,11 @@ import k64325_patch_sleep as patch
 
 ORIGINAL_SHA256 = patch.SOURCE_SHA256
 PAGE_SIZE = 256
-ALLOWED_PAGES = (0x1F00, 0x2200, 0x2E00)
+ALLOWED_PAGES = (0x1700, 0x1F00, 0x2200, 0x2E00)
+# The gain page has no patch dependencies; application code stays dormant in loader mode.
 PAGE_ORDER = {
-    "install": (0x2E00, 0x2200, 0x1F00),
-    "rollback": (0x2200, 0x2E00, 0x1F00),
+    "install": (0x2E00, 0x2200, 0x1F00, 0x1700),
+    "rollback": (0x2200, 0x2E00, 0x1F00, 0x1700),
 }
 WARNING = (
     "If flashing fails, keep the device connected in loader mode and inspect it "
@@ -30,7 +31,9 @@ WARNING = (
 
 def encode_erase(page):
     if type(page) is not int or page not in ALLOWED_PAGES:
-        raise backup.BackupError("erase requires page 0x1f00, 0x2200, or 0x2e00")
+        raise backup.BackupError(
+            "erase requires page 0x1700, 0x1f00, 0x2200, or 0x2e00"
+        )
     return bytes((1, 1, 1, (page >> 8) - 0x0C)) + bytes(60)
 
 
@@ -48,7 +51,7 @@ def encode_program(address, data):
     ):
         raise backup.BackupError(
             "program requires an even address and even length 2..58 within one "
-            "allowed page (0x1f00, 0x2200, or 0x2e00)"
+            "allowed page (0x1700, 0x1f00, 0x2200, or 0x2e00)"
         )
     return bytes((1, 2, count, address >> 8, address & 255)) + data + bytes(59 - count)
 
@@ -304,7 +307,7 @@ def require_current(operation, current, original):
             outside[page : page + PAGE_SIZE] = original[page : page + PAGE_SIZE]
         if outside != original:
             raise backup.BackupError(
-                "rollback refuses changed bytes outside the three allowed pages"
+                "rollback refuses changed bytes outside the four allowed pages"
             )
     else:
         raise backup.BackupError("unknown operation")
@@ -327,7 +330,7 @@ def page_order(operation, target):
         fingerprint = backup.sha256(target)
         if fingerprint == ORIGINAL_SHA256:
             return PAGE_ORDER["rollback"]
-        if parameters is not None and parameters[1] is None:
+        if parameters is not None and parameters[1:] == (None, False):
             return PAGE_ORDER["install"]
     raise backup.BackupError("unsupported operation or target image")
 
@@ -370,10 +373,13 @@ def command_update(args, *, guard=None, expected_target=None, guided=False):
         raise backup.BackupError("backup is not the pinned V0114 original")
     if args.command == "install":
         target = load_candidate(args.candidate, original)
-        interval, cpi = patch.profile_parameters(target)
+        interval, cpi, no_motion_gain = patch.profile_parameters(target)
         target_name = f"sleep-{interval}ms" + (f"-cpi{cpi}" if cpi is not None else "")
+        if no_motion_gain:
+            target_name += "-no-motion-gain"
     elif args.command == "rollback":
         interval, cpi = args.poll_interval_ms, None
+        no_motion_gain = False
         if type(interval) is not int or interval not in patch.POLL_INTERVALS:
             raise backup.BackupError("rollback poll interval must be 10, 4, 2, or 1 ms")
         target_name = args.target
@@ -413,6 +419,7 @@ def command_update(args, *, guard=None, expected_target=None, guided=False):
         "target": target_name,
         "target_bInterval_ms": target[patch.POLL_INTERVAL_OFFSET],
         "target_cpi_requested": cpi,
+        "target_no_motion_gain": no_motion_gain,
         "candidate": str(args.candidate) if args.command == "install" else None,
         "allowed_pages": list(ALLOWED_PAGES),
         "page_order": list(order),
@@ -443,7 +450,11 @@ def command_update(args, *, guard=None, expected_target=None, guided=False):
         print("Verifying firmware...", flush=True)
         capture(transport, transaction, "after", target=target)
         transaction.append("complete", target_sha256=backup.sha256(target))
-    print("Firmware verified: both full readbacks match.", flush=True)
+    print(
+        "Firmware verified: both full readbacks match. "
+        f"Motion gain: {patch.motion_gain_label(no_motion_gain)}.",
+        flush=True,
+    )
     if not guided:
         command = shlex.join(
             [
@@ -467,7 +478,7 @@ def parser():
     result = argparse.ArgumentParser(
         description=(
             "Install or restore a V0114 profile while the device is in loader mode. "
-            "Writes pages 0x1f00, 0x2200 and 0x2e00. "
+            "Writes pages 0x1700, 0x1f00, 0x2200 and 0x2e00. "
             "Use tools/flash-firmware for guided entry, installation, and exit."
         ),
         epilog=(
@@ -479,7 +490,7 @@ def parser():
     for operation, description in (
         (
             "install",
-            "require original backup and known current image; write cave, hook, descriptor",
+            "require original backup and known current image; write cave, hook, descriptor, gain",
         ),
         (
             "rollback",

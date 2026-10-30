@@ -621,15 +621,18 @@ def verify_cache(directory, candidate, manifest):
         )
 
 
-def cached_candidate(root, source, original, cpi, rate, force, files):
+def cached_candidate(
+    root, source, original, cpi, rate, force, files, no_motion_gain=False
+):
     interval = build.POLL_INTERVALS_MS[rate]
     candidate, manifest = patch.prepare(
         original,
         source / backup.IMAGE_NAMES[0],
         interval,
         None if cpi == "stock" else int(cpi),
+        no_motion_gain,
     )
-    stem = build.profile_stem(cpi, rate)
+    stem = build.profile_stem(cpi, rate, no_motion_gain)
     manifest["output"]["file"] = f"{stem}.bin"
     directory = root / stem
     disjoint(source, directory)
@@ -708,6 +711,7 @@ def run_backup(binding, files):
 
 
 def run_flash(args, source, root, binding, files):
+    no_motion_gain = getattr(args, "no_motion_gain", False)
     original = backup.load_backup(source, canonical_boot(binding.node))
     if backup.sha256(original) != patch.SOURCE_SHA256:
         raise backup.BackupError(
@@ -721,6 +725,7 @@ def run_flash(args, source, root, binding, files):
         args.poll_rate_hz,
         args.force_build,
         files,
+        no_motion_gain,
     )
     files.preflight_output()
     print(f"Firmware: {candidate_path}", flush=True)
@@ -731,7 +736,8 @@ def run_flash(args, source, root, binding, files):
     interval = build.POLL_INTERVALS_MS[args.poll_rate_hz]
     binding.confirm(
         "install",
-        f"Install CPI setting {args.cpi}, USB interval {interval} ms ({args.poll_rate_hz} Hz requested).",
+        f"Install CPI setting {args.cpi}, USB interval {interval} ms ({args.poll_rate_hz} Hz requested), "
+        f"motion gain {patch.motion_gain_label(no_motion_gain)}.",
     )
     files.preflight_output()
     with files.operation("install", port=binding.port, sha256=backup.sha256(target)):
@@ -751,7 +757,8 @@ def run_flash(args, source, root, binding, files):
         )
     binding.exit(files.output / "after", expected_target=target)
     print(
-        f"Installed CPI setting {args.cpi}, USB interval {interval} ms. Device is back in application mode.",
+        f"Installed CPI setting {args.cpi}, USB interval {interval} ms, "
+        f"motion gain {patch.motion_gain_label(no_motion_gain)}. Device is back in application mode.",
         flush=True,
     )
     print(f"Readbacks and log: {files.output}", flush=True)
@@ -829,6 +836,9 @@ def parser(action):
             help="USB interval: 100/250/500/1000 Hz selects 10/4/2/1 ms; shorter than 10 ms is experimental",
         )
         cli.add_argument(
+            "--no-motion-gain", action="store_true", help=patch.MOTION_GAIN_HELP
+        )
+        cli.add_argument(
             "--force-build",
             action="store_true",
             help="archive the cached build and generate it again",
@@ -850,7 +860,11 @@ def main(action, argv=None):
                 raise backup.BackupError(
                     "output root must not be inside the original backup"
                 )
-            disjoint(source, root / build.profile_stem(args.cpi, args.poll_rate_hz))
+            disjoint(
+                source,
+                root
+                / build.profile_stem(args.cpi, args.poll_rate_hz, args.no_motion_gain),
+            )
         root = directory_path(root, create=True)
         with RunFiles(root, action) as files, WorkflowLock() as lock:
             binding = Binding(candidates(), lock, files)
