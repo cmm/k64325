@@ -1,5 +1,13 @@
 # K64325 firmware tools
 
+> [!CAUTION]
+> **NO WARRANTY. NO SUPPORT. This is a barely-tested, vibe-coded procedure.**
+>
+> The tools and patch were developed with AI assistance and tested on **one
+> physical trackball**. Offline checks do not establish safety on your device.
+> Use entirely at your own risk. **If things break, you get to keep the pieces.**
+> See the [MIT license](LICENSE) for the warranty and liability disclaimer.
+
 Disable the approximately 20-second sensor deep sleep on the **wired Kensington
 Expert Mouse K64325**, and select CPI and USB polling settings. Every generated
 profile disables automatic sleep2 and keeps sleep1.
